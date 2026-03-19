@@ -287,6 +287,16 @@ interface PendingCommandApproval {
     responseSansCommand: string;
 }
 
+const normalizeShortcutTokens = (keys: string[]): string[] => (
+    keys.map(key => key.trim().toUpperCase()).filter(Boolean)
+);
+
+const isAppNewTabShortcut = (keys: string[]): boolean => {
+    const normalized = normalizeShortcutTokens(keys);
+    const hasModifier = normalized.includes('CTRL') || normalized.includes('CONTROL') || normalized.includes('CMD') || normalized.includes('COMMAND') || normalized.includes('META');
+    return hasModifier && normalized.includes('SHIFT') && normalized.includes('T');
+};
+
 const ReasoningBox = ({ content, isThinking }: { content: string, isThinking: boolean }) => {
     const [isCollapsed, setIsCollapsed] = useState(!isThinking);
 
@@ -417,6 +427,12 @@ function App() {
     const [currentThinking, setCurrentThinking] = useState('');
     const [isThinking, setIsThinking] = useState(false);
 
+    const openNewTab = () => {
+        const newId = String(Date.now());
+        setTabs(prev => [...prev, { id: newId, name: `Tab ${prev.length + 1}` }]);
+        setActiveTabId(newId);
+    };
+
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
             if (!isResizing.current) return;
@@ -448,12 +464,28 @@ function App() {
             setChatFontSize(prev => clampChatFontSize(prev + delta));
         };
 
+        const handleAppShortcuts = (event: KeyboardEvent) => {
+            const normalizedKeys = [
+                event.metaKey ? 'CMD' : '',
+                event.ctrlKey ? 'CTRL' : '',
+                event.shiftKey ? 'SHIFT' : '',
+                event.key,
+            ].filter(Boolean);
+
+            if (isAppNewTabShortcut(normalizedKeys)) {
+                event.preventDefault();
+                openNewTab();
+            }
+        };
+
         window.addEventListener('keydown', handleFontZoom);
+        window.addEventListener('keydown', handleAppShortcuts);
         return () => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
             window.removeEventListener('open-artifact', (e: any) => { });
             window.removeEventListener('keydown', handleFontZoom);
+            window.removeEventListener('keydown', handleAppShortcuts);
             fitTimeoutsRef.current.forEach(timeout => window.clearTimeout(timeout));
         };
     }, []);
@@ -583,9 +615,7 @@ function App() {
     }, []);
 
     const addTab = () => {
-        const newId = String(Date.now());
-        setTabs([...tabs, { id: newId, name: `Tab ${tabs.length + 1}` }]);
-        setActiveTabId(newId);
+        openNewTab();
     };
 
     const removeTab = (e: React.MouseEvent, id: string) => {
@@ -651,9 +681,47 @@ function App() {
             .filter(Boolean)
     );
 
+    const splitCommandSegments = (command: string): string[] => (
+        command
+            .split(/&&|\|\||;|\|/g)
+            .map(segment => segment.trim())
+            .filter(Boolean)
+    );
+
+    const tokenizeCommandSegment = (segment: string): string[] => (
+        segment
+            .replace(/["'`]/g, ' ')
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+    );
+
+    const matchesCommandPattern = (command: string, pattern: string): boolean => {
+        const patternTokens = tokenizeCommandSegment(pattern);
+        if (patternTokens.length === 0) return false;
+
+        return splitCommandSegments(command).some(segment => {
+            const segmentTokens = tokenizeCommandSegment(segment);
+            if (segmentTokens.length < patternTokens.length) return false;
+
+            for (let i = 0; i < patternTokens.length; i += 1) {
+                const expected = patternTokens[i].toLowerCase();
+                const actual = (segmentTokens[i] || '').toLowerCase();
+
+                if (expected.endsWith('=')) {
+                    if (!actual.startsWith(expected)) return false;
+                    continue;
+                }
+
+                if (actual !== expected) return false;
+            }
+
+            return true;
+        });
+    };
+
     const classifyCommand = (command: string): { status: 'allow' | 'blocked' | 'approval'; reason?: string } => {
-        const normalized = command.toLowerCase();
-        const blockedMatch = parseSafetyPatterns(blockedCommandPatterns).find(pattern => normalized.includes(pattern.toLowerCase()));
+        const blockedMatch = parseSafetyPatterns(blockedCommandPatterns).find(pattern => matchesCommandPattern(command, pattern));
         if (blockedMatch) {
             return {
                 status: 'blocked',
@@ -661,7 +729,7 @@ function App() {
             };
         }
 
-        const approvalMatch = parseSafetyPatterns(approvalCommandPatterns).find(pattern => normalized.includes(pattern.toLowerCase()));
+        const approvalMatch = parseSafetyPatterns(approvalCommandPatterns).find(pattern => matchesCommandPattern(command, pattern));
         if (approvalMatch) {
             return {
                 status: 'approval',
@@ -725,6 +793,15 @@ function App() {
         } catch {
             return null;
         }
+    };
+
+    const handleAppLevelSendKeys = (keys: string[]): string | null => {
+        if (isAppNewTabShortcut(keys)) {
+            openNewTab();
+            return 'Opened a new app tab via shortcut.';
+        }
+
+        return null;
     };
 
     const handleCommandApprovalDecision = async (approved: boolean) => {
@@ -817,7 +894,7 @@ function App() {
 
             const baseSystemPrompt = `You are ${mcpLabel}, a professional AI engineer. 
 1. UI: Use <analysis>, <progress>, and <artifact> blocks when they add value. Keep answers compact and readable in a narrow side chat.
-2. SCREEN AWARENESS: You receive SCREEN_CONTEXT describing what is visible in the app right now. When the user asks about "this", "above", "on screen", terminal output, or chat content, use SCREEN_CONTEXT first. If the context is insufficient, say exactly what is missing.
+2. SCREEN AWARENESS: You receive SCREEN_CONTEXT describing what is visible in the app right now. Use SCREEN_CONTEXT only when the task is specifically about what is visible on screen, terminal/editor UI state, or recent chat content. Do NOT use SCREEN_CONTEXT as proof for filesystem facts, file counts, command results, paths, or other verifiable system state when you can check them with tools. For counts, paths, file existence, file contents, process state, or command output, prefer tools first.
 3. TOOLS: To run a terminal command, YOU MUST output this EXACT line:
    >>> EXECUTE_COMMAND: "YOUR_COMMAND" <<<
    To send terminal key presses, YOU MUST output this EXACT line:
@@ -829,6 +906,7 @@ Example: To exit vim without saving, output:
 >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
 
 ALWAYS use the tool when the user asks for terminal actions.
+If the user asks to count files, inspect directories, verify paths, read files, or confirm system state, use terminal commands even if something similar is visible in SCREEN_CONTEXT.
 4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.
 Current OS: ${window.navigator.platform}`;
 
@@ -872,8 +950,9 @@ Current OS: ${window.navigator.platform}`;
                     const isSendKeys = Boolean(keyMatch && match === keyMatch);
                     const toolName: 'execute_command' | 'send_keys' = isSendKeys ? 'send_keys' : 'execute_command';
                     const commandText = isSendKeys ? match[1] : match[1];
+                    const parsedKeys = isSendKeys ? (parseSendKeysPayload(match[1]) || []) : [];
                     const toolArgs = isSendKeys
-                        ? JSON.stringify({ keys: parseSendKeysPayload(match[1]) || [] })
+                        ? JSON.stringify({ keys: parsedKeys })
                         : JSON.stringify({ command: match[1] });
                     const commandPolicy = classifyCommand(commandText);
 
@@ -921,7 +1000,9 @@ Current OS: ${window.navigator.platform}`;
                     setMessages(prev => [...prev, { role: 'system', content: `🔧 Executing ${toolName}...` }]);
 
                     try {
-                        const result = await CallTool(toolName, toolArgs);
+                        const result = isSendKeys
+                            ? (handleAppLevelSendKeys(parsedKeys) ?? await CallTool(toolName, toolArgs))
+                            : await CallTool(toolName, toolArgs);
                         console.log(`[MCP] Tool ${toolName} result:`, result);
                         const toolResultForUi: Message = {
                             role: 'tool',
