@@ -153,6 +153,11 @@ interface Message {
     content: string;
     name?: string;
     reasoning?: string;
+    commandRequest?: {
+        status: 'approval' | 'blocked';
+        command: string;
+        reason: string;
+    };
 }
 
 interface Tab {
@@ -161,6 +166,47 @@ interface Tab {
 }
 
 const ASSISTANT_DISPLAY_NAME = 'Assistant';
+const DEFAULT_BLOCKED_COMMAND_PATTERNS = [
+    'rm -rf /',
+    'rm -rf ~',
+    'mkfs',
+    'dd if=',
+    'shutdown',
+    'reboot',
+    'halt',
+    'poweroff',
+    ':(){ :|:& };:',
+    'diskutil eraseDisk',
+    'format ',
+].join('\n');
+const DEFAULT_APPROVAL_COMMAND_PATTERNS = [
+    'rm ',
+    'rmdir ',
+    'mv ',
+    'cp -r ',
+    'chmod ',
+    'chown ',
+    'sudo ',
+    'git clean',
+    'git reset --hard',
+    'docker system prune',
+    'kill ',
+    'pkill ',
+].join('\n');
+
+const clampTerminalFontSize = (value: number): number => {
+    if (!Number.isFinite(value)) return 14;
+    return Math.min(24, Math.max(10, Math.round(value)));
+};
+
+interface PendingCommandApproval {
+    command: string;
+    toolName: string;
+    toolArgs: string;
+    historyToSend: Message[];
+    baseSystemPrompt: string;
+    responseSansCommand: string;
+}
 
 const ReasoningBox = ({ content, isThinking }: { content: string, isThinking: boolean }) => {
     const [isCollapsed, setIsCollapsed] = useState(!isThinking);
@@ -191,6 +237,7 @@ function App() {
     const terminalContainersRef = useRef<{ [id: string]: HTMLDivElement | null }>({});
     const xtermsRef = useRef<{ [id: string]: Terminal | null }>({});
     const fitAddonsRef = useRef<{ [id: string]: FitAddon | null }>({});
+    const fitTimeoutsRef = useRef<number[]>([]);
 
     const [tabs, setTabs] = useState<Tab[]>([{ id: '1', name: 'Tab 1' }]);
     const [activeTabId, setActiveTabId] = useState('1');
@@ -203,10 +250,9 @@ function App() {
     const [maxTokens, setMaxTokens] = useState(() => Number(localStorage.getItem('maxTokens')) || 4096);
     const [temperature, setTemperature] = useState(() => Number(localStorage.getItem('temperature')) || 0.7);
     const [provider, setProvider] = useState(() => localStorage.getItem('provider') || 'LM Studio');
-    const [isStreaming, setIsStreaming] = useState(() => localStorage.getItem('isStreaming') === 'true');
 
     // Terminal Settings with persistence
-    const [termFontSize, setTermFontSize] = useState(() => Number(localStorage.getItem('termFontSize')) || 14);
+    const [termFontSize, setTermFontSize] = useState(() => clampTerminalFontSize(Number(localStorage.getItem('termFontSize')) || 14));
     const [termFontFamily, setTermFontFamily] = useState(() => localStorage.getItem('termFontFamily') || '"Cascadia Code", Menlo, Monaco, "Courier New", monospace');
     const [termForeground, setTermForeground] = useState(() => localStorage.getItem('termForeground') || '#c0caf5');
     const [termBackground, setTermBackground] = useState(() => localStorage.getItem('termBackground') || '#000000');
@@ -221,6 +267,8 @@ function App() {
     const [chatWidth, setChatWidth] = useState(() => Number(localStorage.getItem('chatWidth')) || 450);
     const [mcpPort, setMcpPort] = useState(() => Number(localStorage.getItem('mcpPort')) || 8080);
     const [mcpLabel, setMcpLabel] = useState(() => localStorage.getItem('mcpLabel') || 'dinkisstyle-gateway');
+    const [blockedCommandPatterns, setBlockedCommandPatterns] = useState(() => localStorage.getItem('blockedCommandPatterns') || DEFAULT_BLOCKED_COMMAND_PATTERNS);
+    const [approvalCommandPatterns, setApprovalCommandPatterns] = useState(() => localStorage.getItem('approvalCommandPatterns') || DEFAULT_APPROVAL_COMMAND_PATTERNS);
     const isResizing = useRef(false);
 
     // MCP Settings with persistence
@@ -233,6 +281,7 @@ function App() {
             return ['search_web', 'read_web_page', 'get_current_time', 'execute_command'];
         }
     });
+    const [pendingApproval, setPendingApproval] = useState<PendingCommandApproval | null>(null);
 
     useEffect(() => {
         localStorage.setItem('apiUrl', apiUrl);
@@ -241,7 +290,6 @@ function App() {
         localStorage.setItem('maxTokens', String(maxTokens));
         localStorage.setItem('temperature', String(temperature));
         localStorage.setItem('provider', provider);
-        localStorage.setItem('isStreaming', String(isStreaming));
         localStorage.setItem('termFontSize', String(termFontSize));
         localStorage.setItem('termFontFamily', termFontFamily);
         localStorage.setItem('termForeground', termForeground);
@@ -251,30 +299,10 @@ function App() {
         localStorage.setItem('chatWidth', String(chatWidth));
         localStorage.setItem('mcpPort', String(mcpPort));
         localStorage.setItem('mcpLabel', mcpLabel);
+        localStorage.setItem('blockedCommandPatterns', blockedCommandPatterns);
+        localStorage.setItem('approvalCommandPatterns', approvalCommandPatterns);
         localStorage.setItem('enabledTools', JSON.stringify(enabledTools));
-    }, [apiUrl, apiKey, modelName, maxTokens, temperature, provider, isStreaming, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, enabledTools]);
-
-    const testLLMConnection = async () => {
-        let url = apiUrl.trim();
-        if (!url.startsWith('http')) url = 'http://' + url;
-        url = url.replace(/\/+$/, '');
-
-        try {
-            console.log(`[LLM] Testing connection to ${url}/models`);
-            const response = await fetch(`${url}/models`, {
-                method: 'GET',
-                signal: AbortSignal.timeout(5000)
-            });
-            if (response.ok) {
-                const data = await response.json();
-                alert(`✅ Connection Successful!\nFound ${data.data?.length || 0} models.`);
-            } else {
-                alert(`❌ Connection Failed: ${response.status} ${response.statusText}`);
-            }
-        } catch (e: any) {
-            alert(`❌ Connection Error: ${e.message || e}\nCheck if the URL is correct and the server is running.`);
-        }
-    };
+    }, [apiUrl, apiKey, modelName, maxTokens, temperature, provider, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools]);
 
     const handleSaveSettings = () => {
         UpdateMCPSettings(mcpPort, mcpLabel);
@@ -325,6 +353,7 @@ function App() {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
             window.removeEventListener('open-artifact', (e: any) => { });
+            fitTimeoutsRef.current.forEach(timeout => window.clearTimeout(timeout));
         };
     }, []);
 
@@ -356,6 +385,30 @@ function App() {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
+    const scheduleTerminalFit = (tabId: string) => {
+        const runFit = () => {
+            const fitAddon = fitAddonsRef.current[tabId];
+            const term = xtermsRef.current[tabId];
+            if (!fitAddon || !term) return;
+
+            try {
+                fitAddon.fit();
+                term.scrollToBottom();
+                if (term.rows > 0 && term.cols > 0) {
+                    ResizeTerminal(tabId, term.cols, term.rows);
+                }
+            } catch (error) {
+                console.warn(`[Terminal] fit failed for tab ${tabId}`, error);
+            }
+        };
+
+        requestAnimationFrame(runFit);
+        [40, 120, 260].forEach(delay => {
+            const timeout = window.setTimeout(runFit, delay);
+            fitTimeoutsRef.current.push(timeout);
+        });
+    };
+
     useEffect(() => {
         scrollToBottom();
     }, [messages, currentThinking]);
@@ -381,21 +434,22 @@ function App() {
             const fitAddon = new FitAddon();
             term.loadAddon(fitAddon);
             term.open(container);
-            fitAddon.fit();
 
             xtermsRef.current[tab.id] = term;
             fitAddonsRef.current[tab.id] = fitAddon;
+            scheduleTerminalFit(tab.id);
 
             term.onData(data => WriteToTerminal(tab.id, data));
-            const unoff = EventsOn("terminal:data:" + tab.id, (data: string) => term.write(data));
+            const unoff = EventsOn("terminal:data:" + tab.id, (data: string) => {
+                term.write(data);
+                scheduleTerminalFit(tab.id);
+            });
             StartTerminal(tab.id);
             (term as any)._unoff = unoff;
         });
 
         const handleResize = () => {
-            Object.values(fitAddonsRef.current).forEach(fit => fit?.fit());
-            const term = xtermsRef.current[activeTabId];
-            if (term) ResizeTerminal(activeTabId, term.cols, term.rows);
+            Object.keys(fitAddonsRef.current).forEach(id => scheduleTerminalFit(id));
         };
 
         window.addEventListener('resize', handleResize);
@@ -405,7 +459,7 @@ function App() {
     useEffect(() => {
         Object.values(xtermsRef.current).forEach(term => {
             if (!term) return;
-            term.options.fontSize = termFontSize;
+            term.options.fontSize = clampTerminalFontSize(termFontSize);
             term.options.fontFamily = termFontFamily;
             term.options.theme = {
                 background: termBackground,
@@ -414,8 +468,14 @@ function App() {
                 selectionBackground: '#3b4261',
             };
         });
-        Object.values(fitAddonsRef.current).forEach(fit => fit?.fit());
+        Object.keys(fitAddonsRef.current).forEach(id => scheduleTerminalFit(id));
     }, [termFontSize, termFontFamily, termBackground, termForeground]);
+
+    useEffect(() => {
+        if (activeTabId) {
+            scheduleTerminalFit(activeTabId);
+        }
+    }, [activeTabId, chatWidth]);
 
     useEffect(() => {
         GetTools().then(setAvailableTools);
@@ -483,6 +543,125 @@ function App() {
         ].join('\n');
     };
 
+    const parseSafetyPatterns = (value: string): string[] => (
+        value
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean)
+    );
+
+    const classifyCommand = (command: string): { status: 'allow' | 'blocked' | 'approval'; reason?: string } => {
+        const normalized = command.toLowerCase();
+        const blockedMatch = parseSafetyPatterns(blockedCommandPatterns).find(pattern => normalized.includes(pattern.toLowerCase()));
+        if (blockedMatch) {
+            return {
+                status: 'blocked',
+                reason: `차단 규칙 "${blockedMatch}" 과 일치하여 앱이 실행을 막았습니다.`,
+            };
+        }
+
+        const approvalMatch = parseSafetyPatterns(approvalCommandPatterns).find(pattern => normalized.includes(pattern.toLowerCase()));
+        if (approvalMatch) {
+            return {
+                status: 'approval',
+                reason: `승인 규칙 "${approvalMatch}" 과 일치하여 사용자 확인이 필요합니다.`,
+            };
+        }
+
+        return { status: 'allow' };
+    };
+
+    const buildLLMMessages = (history: Message[], baseSystemPrompt: string) => {
+        const screenContext = buildScreenContext(history);
+        return [{
+            role: 'system',
+            content: `${baseSystemPrompt}\n\nSCREEN_CONTEXT:\n${screenContext}`
+        }, ...history];
+    };
+
+    const continueAfterToolExecution = async (
+        toolName: string,
+        toolArgs: string,
+        result: string,
+        historyToSend: Message[],
+        baseSystemPrompt: string,
+        responseSansCommand: string,
+    ) => {
+        const toolRole: 'tool' | 'user' = (provider === 'OpenAI') ? 'tool' : 'user';
+        const toolContent = (toolRole === 'user') ? `[Tool Response from ${toolName}]: ${result}` : result;
+        const toolResultMsg: Message = { role: toolRole, content: toolContent, name: toolName };
+
+        historyToSend.push({ role: 'assistant', content: `[TOOL: ${toolName} ${toolArgs}]` });
+        historyToSend.push(toolResultMsg);
+
+        let nextResponse = '';
+        if (responseSansCommand) {
+            nextResponse = responseSansCommand;
+        }
+
+        const llmMessages = buildLLMMessages(historyToSend, baseSystemPrompt);
+        nextResponse = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
+        return nextResponse;
+    };
+
+    const handleCommandApprovalDecision = async (approved: boolean) => {
+        if (!pendingApproval) return;
+
+        const request = pendingApproval;
+        setPendingApproval(null);
+
+        if (!approved) {
+            setMessages(prev => prev.map(message => (
+                message.commandRequest?.status === 'approval' && message.commandRequest.command === request.command
+                    ? {
+                        ...message,
+                        role: 'system',
+                        commandRequest: undefined,
+                        content: `명령 실행이 취소되었습니다.\n\nCommand: \`${request.command}\``,
+                    }
+                    : message
+            )));
+            return;
+        }
+
+        setMessages(prev => prev.map(message => (
+            message.commandRequest?.status === 'approval' && message.commandRequest.command === request.command
+                ? {
+                    ...message,
+                    commandRequest: undefined,
+                    content: `사용자 승인을 받아 명령을 실행합니다.\n\nCommand: \`${request.command}\``,
+                }
+                : message
+        )));
+
+        setIsLoading(true);
+        setIsThinking(false);
+
+        try {
+            const result = await CallTool(request.toolName, request.toolArgs);
+            setMessages(prev => [...prev, {
+                role: 'tool',
+                name: request.toolName,
+                content: `Command: \`${request.command}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
+            }]);
+
+            const response = await continueAfterToolExecution(
+                request.toolName,
+                request.toolArgs,
+                result,
+                [...request.historyToSend],
+                request.baseSystemPrompt,
+                request.responseSansCommand,
+            );
+
+            setMessages(prev => [...prev, { role: 'assistant', content: response || '명령 실행은 완료되었지만 후속 응답이 비어 있습니다.' }]);
+        } catch (error: any) {
+            setMessages(prev => [...prev, { role: 'system', content: `❌ 승인된 명령 실행 실패: ${error.message || error}` }]);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
     const sendMessage = async () => {
         if (!inputText.trim() || isLoading) return;
 
@@ -517,17 +696,10 @@ Current OS: ${window.navigator.platform}`;
                 return true;
             });
 
-            const buildLLMMessages = (history: Message[]) => {
-                const screenContext = buildScreenContext(history);
-                return [{
-                    role: 'system',
-                    content: `${baseSystemPrompt}\n\nSCREEN_CONTEXT:\n${screenContext}`
-                }, ...history];
-            };
-
-            let currentMessages: any[] = buildLLMMessages(historyToSend);
+            let currentMessages: any[] = buildLLMMessages(historyToSend, baseSystemPrompt);
             console.log("[LLM] Sending Payload:", JSON.stringify(currentMessages, null, 2));
             let response = '';
+            let commandIntercepted = false;
             setCurrentThinking('');
             setIsThinking(true);
 
@@ -540,7 +712,7 @@ Current OS: ${window.navigator.platform}`;
                     await (window as any).go.main.App.StopLLMResponse();
                 }
 
-                response = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, isStreaming, currentMessages);
+                response = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, currentMessages);
             } catch (err) {
                 throw err;
             } finally {
@@ -556,33 +728,68 @@ Current OS: ${window.navigator.platform}`;
                     const toolName = "execute_command";
                     const toolArgs = JSON.stringify({ command: match[1] });
                     const commandText = match[1];
+                    const commandPolicy = classifyCommand(commandText);
 
                     // Filter out the tool call from the response to prevent loops and show only final text
                     response = response.replace(match[0], '').trim();
+
+                    if (commandPolicy.status === 'blocked') {
+                        commandIntercepted = true;
+                        setMessages(prev => [...prev, {
+                            role: 'system',
+                            content: response || '위험한 명령이 감지되어 실행되지 않았습니다.',
+                            commandRequest: {
+                                status: 'blocked',
+                                command: commandText,
+                                reason: commandPolicy.reason || '차단 규칙과 일치했습니다.',
+                            },
+                        }]);
+                        response = '';
+                        break;
+                    }
+
+                    if (commandPolicy.status === 'approval') {
+                        commandIntercepted = true;
+                        setPendingApproval({
+                            command: commandText,
+                            toolName,
+                            toolArgs,
+                            historyToSend: [...historyToSend],
+                            baseSystemPrompt,
+                            responseSansCommand: response,
+                        });
+                        setMessages(prev => [...prev, {
+                            role: 'system',
+                            content: response || '이 명령은 실행 전에 사용자 승인이 필요합니다.',
+                            commandRequest: {
+                                status: 'approval',
+                                command: commandText,
+                                reason: commandPolicy.reason || '사용자 승인이 필요합니다.',
+                            },
+                        }]);
+                        response = '';
+                        break;
+                    }
 
                     setMessages(prev => [...prev, { role: 'system', content: `🔧 Executing ${toolName}...` }]);
 
                     try {
                         const result = await CallTool(toolName, toolArgs);
                         console.log(`[MCP] Tool ${toolName} result:`, result);
-
-                        // Map role: 'tool' to 'user' for local LLMs for better compatibility
-                        const toolRole: 'tool' | 'user' = (provider === 'OpenAI') ? 'tool' : 'user';
-                        const toolContent = (toolRole === 'user') ? `[Tool Response from ${toolName}]: ${result}` : result;
-                        const toolResultMsg: Message = { role: toolRole, content: toolContent, name: toolName };
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
                             content: `Command: \`${commandText}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
                         };
-
-                        historyToSend.push({ role: 'assistant', content: `[TOOL: ${toolName} ${toolArgs}]` });
-                        historyToSend.push(toolResultMsg);
                         setMessages(prev => [...prev, toolResultForUi]);
-                        currentMessages = buildLLMMessages(historyToSend);
-
-                        // Get next response after tool execution
-                        response = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, isStreaming, currentMessages);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            toolArgs,
+                            result,
+                            historyToSend,
+                            baseSystemPrompt,
+                            response,
+                        );
                     } catch (err) {
                         response = `Error calling tool ${toolName}: ${err}`;
                         break;
@@ -592,8 +799,20 @@ Current OS: ${window.navigator.platform}`;
                 }
             }
 
-            if (!response && !currentThinking) {
+            if (!response && !currentThinking && !commandIntercepted) {
                 response = "죄송합니다. 응답을 생성하지 못했습니다. 설정을 확인하거나 다시 시도해 주세요.";
+            }
+
+            if (commandIntercepted) {
+                setMessages(prev => {
+                    const updated = [...prev];
+                    const last = updated[updated.length - 1];
+                    if (last?.role === 'assistant' && !last.content) {
+                        updated.pop();
+                    }
+                    return updated;
+                });
+                return;
             }
 
             setMessages(prev => {
@@ -695,6 +914,20 @@ Current OS: ${window.navigator.platform}`;
                                     )}
                                     <div className="bubble">
                                         <div dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }} />
+                                        {m.commandRequest && (
+                                            <div className={`command-approval ${m.commandRequest.status}`}>
+                                                <div className="command-approval-reason">{m.commandRequest.reason}</div>
+                                                <div className="command-approval-command">
+                                                    <code>{m.commandRequest.command}</code>
+                                                </div>
+                                                {m.commandRequest.status === 'approval' && (
+                                                    <div className="command-approval-actions">
+                                                        <button className="approval-cancel-btn" onClick={() => handleCommandApprovalDecision(false)}>취소</button>
+                                                        <button className="approval-run-btn" onClick={() => handleCommandApprovalDecision(true)}>실행</button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             ))}
@@ -711,9 +944,18 @@ Current OS: ${window.navigator.platform}`;
                                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
                             ></textarea>
                             {isLoading ? (
-                                <button className="stop-btn" onClick={handleStop}>정지</button>
+                                <button className="stop-btn" onClick={handleStop} title="정지" aria-label="정지">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+                                        <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>
+                                    </svg>
+                                </button>
                             ) : (
-                                <button className="send-btn" onClick={sendMessage}>전송</button>
+                                <button className="send-btn" onClick={sendMessage} title="전송" aria-label="전송">
+                                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                        <path d="M5 12h12"></path>
+                                        <path d="M13 5l7 7-7 7"></path>
+                                    </svg>
+                                </button>
                             )}
                         </div>
                     </div>
@@ -732,10 +974,7 @@ Current OS: ${window.navigator.platform}`;
                                     <div className="settings-grid">
                                         <div className="settings-field full">
                                             <label>Server URL</label>
-                                            <div style={{ display: 'flex', gap: '8px' }}>
-                                                <input style={{ flex: 1 }} type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://127.0.0.1:1234/v1" />
-                                                <button onClick={testLLMConnection} style={{ padding: '0 12px', fontSize: '12px' }}>Test</button>
-                                            </div>
+                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://127.0.0.1:1234/v1" />
                                         </div>
                                         <div className="settings-field full">
                                             <label>API Key (Optional)</label>
@@ -753,7 +992,6 @@ Current OS: ${window.navigator.platform}`;
                                                 <option>LM Studio</option><option>OpenAI</option><option>Ollama</option><option>Custom</option>
                                             </select>
                                         </div>
-                                        <div className="settings-field stream-field"><label>Streaming</label><input type="checkbox" checked={isStreaming} onChange={e => setIsStreaming(e.target.checked)} /></div>
                                     </div>
                                 </div>
                                 <div className="settings-section">
@@ -766,7 +1004,7 @@ Current OS: ${window.navigator.platform}`;
                                 <div className="settings-section">
                                     <h4>Terminal Appearance</h4>
                                     <div className="settings-grid">
-                                        <div className="settings-field"><label>FontSize</label><input type="number" value={termFontSize} onChange={e => setTermFontSize(Number(e.target.value))} /></div>
+                                        <div className="settings-field"><label>FontSize</label><input type="number" min="10" max="24" value={termFontSize} onChange={e => setTermFontSize(clampTerminalFontSize(Number(e.target.value)))} /></div>
                                         <div className="settings-field"><label>FontFamily</label><input type="text" value={termFontFamily} onChange={e => setTermFontFamily(e.target.value)} /></div>
                                         <div className="settings-field"><label>Foreground</label><input type="color" value={termForeground} onChange={e => setTermForeground(e.target.value)} /></div>
                                         <div className="settings-field"><label>Background</label><input type="color" value={termBackground} onChange={e => setTermBackground(e.target.value)} /></div>
@@ -795,6 +1033,35 @@ Current OS: ${window.navigator.platform}`;
                                                 </label>
                                             </div>
                                         ))}
+                                    </div>
+                                </div>
+                                <div className="settings-section">
+                                    <h4>Command Safety</h4>
+                                    <div className="settings-grid">
+                                        <div className="settings-field full">
+                                            <div className="settings-field-header">
+                                                <label>Blocked Commands Patterns</label>
+                                                <button className="mini-reset-btn" onClick={() => setBlockedCommandPatterns(DEFAULT_BLOCKED_COMMAND_PATTERNS)}>기본값</button>
+                                            </div>
+                                            <textarea
+                                                className="settings-textarea"
+                                                value={blockedCommandPatterns}
+                                                onChange={e => setBlockedCommandPatterns(e.target.value)}
+                                            />
+                                            <span style={{ fontSize: '10px', opacity: 0.6 }}>한 줄에 하나씩 입력하세요. 일치하면 앱이 LLM 실행 전에 차단합니다.</span>
+                                        </div>
+                                        <div className="settings-field full">
+                                            <div className="settings-field-header">
+                                                <label>Approval Required Patterns</label>
+                                                <button className="mini-reset-btn" onClick={() => setApprovalCommandPatterns(DEFAULT_APPROVAL_COMMAND_PATTERNS)}>기본값</button>
+                                            </div>
+                                            <textarea
+                                                className="settings-textarea"
+                                                value={approvalCommandPatterns}
+                                                onChange={e => setApprovalCommandPatterns(e.target.value)}
+                                            />
+                                            <span style={{ fontSize: '10px', opacity: 0.6 }}>한 줄에 하나씩 입력하세요. 일치하면 채팅창에서 취소/실행 승인을 요청합니다.</span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
