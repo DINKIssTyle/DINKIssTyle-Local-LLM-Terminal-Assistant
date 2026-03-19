@@ -34,6 +34,37 @@ function renderTextBlock(block: string): string {
     const lines = block.split('\n').map(line => line.trimEnd()).filter(Boolean);
     if (lines.length === 0) return '';
 
+    if (lines.length === 1 && /^---+$/.test(lines[0].trim())) {
+        return '<hr>';
+    }
+
+    if (lines.length === 1) {
+        const headingMatch = lines[0].match(/^(#{1,6})\s+(.*)$/);
+        if (headingMatch) {
+            const level = Math.min(6, headingMatch[1].length);
+            return `<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`;
+        }
+    }
+
+    const isTableBlock =
+        lines.length >= 2 &&
+        lines.every(line => line.includes('|')) &&
+        /^\s*\|?[\-\s:|]+\|?\s*$/.test(lines[1]);
+
+    if (isTableBlock) {
+        const parseTableRow = (line: string) => line
+            .trim()
+            .replace(/^\|/, '')
+            .replace(/\|$/, '')
+            .split('|')
+            .map(cell => cell.trim());
+
+        const headerCells = parseTableRow(lines[0]);
+        const bodyRows = lines.slice(2).map(parseTableRow).filter(row => row.some(Boolean));
+
+        return `<table><thead><tr>${headerCells.map(cell => `<th>${renderInlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${bodyRows.map(row => `<tr>${row.map(cell => `<td>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    }
+
     if (lines.every(line => /^\d+\.\s+/.test(line))) {
         return `<ol>${lines.map(line => `<li>${renderInlineMarkdown(line.replace(/^\d+\.\s+/, ''))}</li>`).join('')}</ol>`;
     }
@@ -57,6 +88,14 @@ function stripMarkupForContext(text: string): string {
         .trim();
 }
 
+function isMeaningfulProgressLine(line: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^`+$/.test(trimmed)) return false;
+    if (/^[-*]+$/.test(trimmed)) return false;
+    return true;
+}
+
 function renderMarkdown(text: string): string {
     if (!text) return '';
 
@@ -77,7 +116,7 @@ function renderMarkdown(text: string): string {
         const items = content
             .split('\n')
             .map((line: string) => line.trim())
-            .filter(Boolean)
+            .filter(isMeaningfulProgressLine)
             .map((line: string, index: number) => {
                 const match = line.match(/^(\d+)\.\s*(.*)/);
                 const step = match ? match[2] : line;
@@ -97,7 +136,7 @@ function renderMarkdown(text: string): string {
         const items = content
             .split('\n')
             .map((line: string) => line.trim())
-            .filter(Boolean)
+            .filter(isMeaningfulProgressLine)
             .map((line: string, index: number) => {
                 const cleaned = line.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '');
                 return `<div class="progress-item"><span class="progress-num">${index + 1}</span><span>${renderInlineMarkdown(cleaned)}</span></div>`;
@@ -121,6 +160,21 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
+    html = html.replace(/<artifact([^>]*)>/gi, (_, attrs) => {
+        const typeMatch = attrs.match(/type="([^"]*)"/i);
+        const idMatch = attrs.match(/id="([^"]*)"/i);
+        const title = idMatch?.[1] || 'Artifact';
+        const type = typeMatch?.[1] || 'artifact';
+        return stash(`<section class="artifact-card">
+            <div class="artifact-header">
+                <div class="artifact-title">${renderInlineMarkdown(title)}</div>
+            </div>
+            <div class="artifact-type">${renderInlineMarkdown(type)}</div>
+        </section>`);
+    });
+
+    html = html.replace(/<\/artifact>/gi, '');
+
     html = html.replace(/>>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</g, (_, command) => {
         return stash(`<section class="message-block command-block">
             <div class="command-header">
@@ -128,6 +182,16 @@ function renderMarkdown(text: string): string {
                 <span class="progress-meta">Action</span>
             </div>
             <div class="command-body"><code>${escapeHtml(command.trim())}</code></div>
+        </section>`);
+    });
+
+    html = html.replace(/>>>\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</g, (_, keysJson) => {
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>Send Keys</span>
+                <span class="progress-meta">Action</span>
+            </div>
+            <div class="command-body"><code>${escapeHtml(keysJson.trim())}</code></div>
         </section>`);
     });
 
@@ -201,7 +265,7 @@ const clampTerminalFontSize = (value: number): number => {
 
 interface PendingCommandApproval {
     command: string;
-    toolName: string;
+    toolName: 'execute_command' | 'send_keys';
     toolArgs: string;
     historyToSend: Message[];
     baseSystemPrompt: string;
@@ -604,6 +668,18 @@ function App() {
         return nextResponse;
     };
 
+    const parseSendKeysPayload = (payload: string): string[] | null => {
+        try {
+            const parsed = JSON.parse(payload);
+            if (!Array.isArray(parsed) || !parsed.every(item => typeof item === 'string')) {
+                return null;
+            }
+            return parsed;
+        } catch {
+            return null;
+        }
+    };
+
     const handleCommandApprovalDecision = async (approved: boolean) => {
         if (!pendingApproval) return;
 
@@ -683,9 +759,13 @@ function App() {
 2. SCREEN AWARENESS: You receive SCREEN_CONTEXT describing what is visible in the app right now. When the user asks about "this", "above", "on screen", terminal output, or chat content, use SCREEN_CONTEXT first. If the context is insufficient, say exactly what is missing.
 3. TOOLS: To run a terminal command, YOU MUST output this EXACT line:
    >>> EXECUTE_COMMAND: "YOUR_COMMAND" <<<
+   To send terminal key presses, YOU MUST output this EXACT line:
+   >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
    
 Example: To check the home folder, output:
 >>> EXECUTE_COMMAND: "cd ~ && ls" <<<
+Example: To exit vim without saving, output:
+>>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
 
 ALWAYS use the tool when the user asks for terminal actions.
 4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.
@@ -719,21 +799,27 @@ Current OS: ${window.navigator.platform}`;
                 setIsThinking(false);
             }
 
-            // Ultra-simple regex for local LLMs: >>> EXECUTE_COMMAND: "cmd" <<<
+            // Ultra-simple regex for local LLMs: >>> EXECUTE_COMMAND: "cmd" <<< or >>> SEND_KEYS: ["ESC"] <<<
             const toolRegex = />>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
+            const sendKeysRegex = />>>\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
 
             while (true) {
-                const match = response.match(toolRegex);
+                const commandMatch = response.match(toolRegex);
+                const keyMatch = response.match(sendKeysRegex);
+                const match = commandMatch || keyMatch;
                 if (match) {
-                    const toolName = "execute_command";
-                    const toolArgs = JSON.stringify({ command: match[1] });
-                    const commandText = match[1];
+                    const isSendKeys = Boolean(keyMatch && match === keyMatch);
+                    const toolName: 'execute_command' | 'send_keys' = isSendKeys ? 'send_keys' : 'execute_command';
+                    const commandText = isSendKeys ? match[1] : match[1];
+                    const toolArgs = isSendKeys
+                        ? JSON.stringify({ keys: parseSendKeysPayload(match[1]) || [] })
+                        : JSON.stringify({ command: match[1] });
                     const commandPolicy = classifyCommand(commandText);
 
                     // Filter out the tool call from the response to prevent loops and show only final text
                     response = response.replace(match[0], '').trim();
 
-                    if (commandPolicy.status === 'blocked') {
+                    if (!isSendKeys && commandPolicy.status === 'blocked') {
                         commandIntercepted = true;
                         setMessages(prev => [...prev, {
                             role: 'system',
@@ -748,7 +834,7 @@ Current OS: ${window.navigator.platform}`;
                         break;
                     }
 
-                    if (commandPolicy.status === 'approval') {
+                    if (!isSendKeys && commandPolicy.status === 'approval') {
                         commandIntercepted = true;
                         setPendingApproval({
                             command: commandText,
@@ -779,7 +865,7 @@ Current OS: ${window.navigator.platform}`;
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
-                            content: `Command: \`${commandText}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
+                            content: `${isSendKeys ? 'Keys' : 'Command'}: \`${commandText}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
                         };
                         setMessages(prev => [...prev, toolResultForUi]);
                         response = await continueAfterToolExecution(

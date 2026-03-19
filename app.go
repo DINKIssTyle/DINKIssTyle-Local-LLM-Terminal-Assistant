@@ -22,6 +22,47 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+func encodeTerminalKeys(keys []string) (string, error) {
+	var builder strings.Builder
+
+	for _, key := range keys {
+		normalized := strings.ToUpper(strings.TrimSpace(key))
+		switch normalized {
+		case "ESC":
+			builder.WriteByte(0x1b)
+		case "ENTER", "RETURN":
+			builder.WriteByte('\r')
+		case "TAB":
+			builder.WriteByte('\t')
+		case "SPACE":
+			builder.WriteByte(' ')
+		case "BACKSPACE":
+			builder.WriteByte(0x7f)
+		case "CTRL_C":
+			builder.WriteByte(0x03)
+		case "CTRL_D":
+			builder.WriteByte(0x04)
+		case "CTRL_Z":
+			builder.WriteByte(0x1a)
+		case "UP":
+			builder.WriteString("\x1b[A")
+		case "DOWN":
+			builder.WriteString("\x1b[B")
+		case "RIGHT":
+			builder.WriteString("\x1b[C")
+		case "LEFT":
+			builder.WriteString("\x1b[D")
+		default:
+			if key == "" {
+				return "", fmt.Errorf("empty key sequence")
+			}
+			builder.WriteString(key)
+		}
+	}
+
+	return builder.String(), nil
+}
+
 // App struct
 type App struct {
 	ctx         context.Context
@@ -64,6 +105,26 @@ func (a *App) startup(ctx context.Context) {
 			return "", err
 		}
 		return fmt.Sprintf("Command '%s' sent to active terminal (Tab ID: %s)", command, activeId), nil
+	}
+	mcp.TerminalKeyExecutor = func(keys []string) (string, error) {
+		a.mu.Lock()
+		activeId := a.activeTabId
+		a.mu.Unlock()
+
+		if activeId == "" {
+			return "", fmt.Errorf("no active terminal tab")
+		}
+
+		encoded, err := encodeTerminalKeys(keys)
+		if err != nil {
+			return "", err
+		}
+
+		if err := a.WriteToTerminal(activeId, encoded); err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf("Keys %v sent to active terminal (Tab ID: %s)", keys, activeId), nil
 	}
 }
 

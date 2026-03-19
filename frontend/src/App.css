@@ -314,6 +314,68 @@ select {
     margin: 0;
 }
 
+.bubble h1,
+.bubble h2,
+.bubble h3,
+.bubble h4,
+.bubble h5,
+.bubble h6 {
+    margin: 0;
+    line-height: 1.3;
+    font-size: inherit;
+    font-weight: 800;
+}
+
+.bubble h1 + p,
+.bubble h2 + p,
+.bubble h3 + p,
+.bubble h4 + p,
+.bubble h5 + p,
+.bubble h6 + p,
+.bubble hr + p {
+    margin-top: 10px;
+}
+
+.bubble hr {
+    margin: 10px 0;
+    border: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.bubble table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.bubble th,
+.bubble td {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    text-align: left;
+    vertical-align: top;
+    line-height: 1.4;
+}
+
+.bubble th:last-child,
+.bubble td:last-child {
+    border-right: none;
+}
+
+.bubble tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.bubble th {
+    color: #b8d8ff;
+    background: rgba(88, 166, 255, 0.08);
+    font-weight: 700;
+}
+
 .bubble p + p,
 .bubble p + ul,
 .bubble p + ol,
@@ -408,6 +470,7 @@ select {
     padding: 12px 14px;
     color: #b7dbff;
     background: rgba(88, 166, 255, 0.12);
+    font-size: inherit;
 }
 
 .analysis-icon {
@@ -441,8 +504,9 @@ select {
     gap: 12px;
     padding: 12px 14px;
     border-bottom: 1px solid var(--border-color);
-    font-size: 13px;
+    font-size: inherit;
     font-weight: 700;
+    line-height: 1.25;
 }
 
 .command-header {
@@ -452,9 +516,10 @@ select {
     gap: 12px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--border-color);
-    font-size: 12px;
+    font-size: inherit;
     font-weight: 800;
     color: #b9d7ff;
+    line-height: 1.25;
 }
 
 .progress-meta,
@@ -470,8 +535,8 @@ select {
     padding: 10px 14px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     color: var(--text-muted);
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: inherit;
+    line-height: 1.4;
 }
 
 .progress-list {
@@ -565,8 +630,9 @@ select {
     grid-template-columns: 20px minmax(0, 1fr);
     gap: 10px;
     align-items: start;
-    font-size: 13px;
+    font-size: inherit;
     color: var(--text-color);
+    line-height: 1.32;
 }
 
 .progress-num {
@@ -583,7 +649,7 @@ select {
 }
 
 .artifact-title {
-    font-size: 14px;
+    font-size: inherit;
     font-weight: 700;
 }
 

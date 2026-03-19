@@ -14,6 +14,7 @@ import (
 // TerminalExecutor is a callback function that writes to the terminal.
 // It should return the output and any error.
 var TerminalExecutor func(command string) (string, error)
+var TerminalKeyExecutor func(keys []string) (string, error)
 
 type Tool struct {
 	Name        string      `json:"name"`
@@ -65,6 +66,23 @@ func GetToolList() []Tool {
 					},
 				},
 				"required": []string{"command"},
+			},
+		},
+		{
+			Name:        "send_keys",
+			Description: "Send raw key presses to the active terminal. Use this for ESC, ENTER, CTRL_C and editor interactions.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"keys": map[string]interface{}{
+						"type":        "array",
+						"description": "Ordered list of keys like ESC, ENTER, CTRL_C, or plain text chunks such as :q!",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+				},
+				"required": []string{"keys"},
 			},
 		},
 		{
@@ -128,6 +146,21 @@ func ExecuteToolByName(toolName string, argumentsJSON string) (string, error) {
 			return TerminalExecutor(args.Command)
 		}
 		return ExecuteCommand(args.Command)
+
+	case "send_keys":
+		var args struct {
+			Keys []string `json:"keys"`
+		}
+		if err := json.Unmarshal([]byte(argumentsJSON), &args); err != nil {
+			return "", fmt.Errorf("invalid arguments: %v", err)
+		}
+		if len(args.Keys) == 0 {
+			return "", fmt.Errorf("keys cannot be empty")
+		}
+		if TerminalKeyExecutor == nil {
+			return "", fmt.Errorf("terminal key executor not configured")
+		}
+		return TerminalKeyExecutor(args.Keys)
 
 	case "naver_search":
 		var args struct {
