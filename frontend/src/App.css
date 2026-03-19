@@ -463,6 +463,13 @@ select {
     overflow: hidden;
 }
 
+.bubble .message-block + .message-block,
+.bubble .message-block + .artifact-card,
+.bubble .artifact-card + .message-block,
+.bubble .artifact-card + .artifact-card {
+    margin-top: 10px;
+}
+
 .analysis-block {
     display: flex;
     align-items: center;
@@ -528,6 +535,11 @@ select {
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--text-subtle);
+}
+
+.artifact-card {
+    display: flex;
+    flex-direction: column;
 }
 
 .progress-description,
@@ -645,12 +657,20 @@ select {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 12px 14px 8px;
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .artifact-title {
     font-size: inherit;
     font-weight: 700;
+    line-height: 1.3;
+}
+
+.artifact-type {
+    display: block;
+    padding: 8px 14px 10px;
+    line-height: 1.2;
 }
 
 .open-btn {

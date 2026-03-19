@@ -96,6 +96,16 @@ function isMeaningfulProgressLine(line: string): boolean {
     return true;
 }
 
+function humanizeArtifactLabel(value: string): string {
+    const normalized = value.trim().replace(/[_-]+/g, ' ');
+    if (!normalized) return 'Artifact';
+
+    return normalized
+        .split(/\s+/)
+        .map(token => token.length <= 3 ? token.toUpperCase() : token.charAt(0).toUpperCase() + token.slice(1))
+        .join(' ');
+}
+
 function renderMarkdown(text: string): string {
     if (!text) return '';
 
@@ -155,7 +165,7 @@ function renderMarkdown(text: string): string {
                 <div class="artifact-title">${renderInlineMarkdown(title)}</div>
                 <button class="open-btn" onclick="window.dispatchEvent(new CustomEvent('open-artifact', {detail: '${escapeHtml(path.trim())}'}))">Open</button>
             </div>
-            <div class="artifact-type">${renderInlineMarkdown(type)}</div>
+            <div class="artifact-type">${renderInlineMarkdown(humanizeArtifactLabel(type))}</div>
             <div class="artifact-desc">${renderInlineMarkdown(desc)}</div>
         </section>`);
     });
@@ -163,8 +173,8 @@ function renderMarkdown(text: string): string {
     html = html.replace(/<artifact([^>]*)>/gi, (_, attrs) => {
         const typeMatch = attrs.match(/type="([^"]*)"/i);
         const idMatch = attrs.match(/id="([^"]*)"/i);
-        const title = idMatch?.[1] || 'Artifact';
-        const type = typeMatch?.[1] || 'artifact';
+        const title = humanizeArtifactLabel(idMatch?.[1] || 'Artifact');
+        const type = humanizeArtifactLabel(typeMatch?.[1] || 'artifact');
         return stash(`<section class="artifact-card">
             <div class="artifact-header">
                 <div class="artifact-title">${renderInlineMarkdown(title)}</div>
@@ -695,6 +705,16 @@ function App() {
         return nextResponse;
     };
 
+    const ensureAssistantPlaceholder = () => {
+        setMessages(prev => {
+            const last = prev[prev.length - 1];
+            if (last?.role === 'assistant') {
+                return prev;
+            }
+            return [...prev, { role: 'assistant', content: '', reasoning: '' }];
+        });
+    };
+
     const parseSendKeysPayload = (payload: string): string[] | null => {
         try {
             const parsed = JSON.parse(payload);
@@ -739,6 +759,7 @@ function App() {
 
         setIsLoading(true);
         setIsThinking(false);
+        setCurrentThinking('');
 
         try {
             const result = await CallTool(request.toolName, request.toolArgs);
@@ -748,6 +769,8 @@ function App() {
                 content: `Command: \`${request.command}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
             }]);
 
+            ensureAssistantPlaceholder();
+            setIsThinking(true);
             const response = await continueAfterToolExecution(
                 request.toolName,
                 request.toolArgs,
@@ -756,12 +779,23 @@ function App() {
                 request.baseSystemPrompt,
                 request.responseSansCommand,
             );
+            setIsThinking(false);
 
-            setMessages(prev => [...prev, { role: 'assistant', content: response || '명령 실행은 완료되었지만 후속 응답이 비어 있습니다.' }]);
+            setMessages(prev => {
+                const updated = [...prev];
+                const last = updated[updated.length - 1];
+                if (last?.role === 'assistant') {
+                    last.content = response || '명령 실행은 완료되었지만 후속 응답이 비어 있습니다.';
+                    last.reasoning = currentThinking;
+                    return updated;
+                }
+                return [...updated, { role: 'assistant', content: response || '명령 실행은 완료되었지만 후속 응답이 비어 있습니다.', reasoning: currentThinking }];
+            });
         } catch (error: any) {
             setMessages(prev => [...prev, { role: 'system', content: `❌ 승인된 명령 실행 실패: ${error.message || error}` }]);
         } finally {
             setIsLoading(false);
+            setIsThinking(false);
         }
     };
 
@@ -895,6 +929,9 @@ Current OS: ${window.navigator.platform}`;
                             content: `${isSendKeys ? 'Keys' : 'Command'}: \`${commandText}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
                         };
                         setMessages(prev => [...prev, toolResultForUi]);
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        setIsThinking(true);
                         response = await continueAfterToolExecution(
                             toolName,
                             toolArgs,
@@ -903,6 +940,7 @@ Current OS: ${window.navigator.platform}`;
                             baseSystemPrompt,
                             response,
                         );
+                        setIsThinking(false);
                     } catch (err) {
                         response = `Error calling tool ${toolName}: ${err}`;
                         break;
