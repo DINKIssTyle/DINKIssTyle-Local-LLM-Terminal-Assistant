@@ -893,6 +893,41 @@ select {
     line-height: 1.45;
 }
 
+.model-selection-group {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.model-select {
+    flex: 1;
+    cursor: pointer;
+}
+
+.refresh-models-btn {
+    flex: 0 0 auto;
+    height: 34px;
+    padding: 0 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border-color);
+    background: rgba(88, 166, 255, 0.1);
+    color: #58a6ff;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.refresh-models-btn:hover:not(:disabled) {
+    background: rgba(88, 166, 255, 0.2);
+    border-color: #58a6ff;
+}
+
+.refresh-models-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .mini-reset-btn {
     height: 26px;
     padding: 0 10px;

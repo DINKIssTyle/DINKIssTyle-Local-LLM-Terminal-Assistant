@@ -491,29 +491,29 @@ function App() {
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
     // Settings with persistence
-    const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'http://localhost:1234/v1');
+    const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'localhost:1234');
     const [apiKey, setApiKey] = useState(() => localStorage.getItem('apiKey') || '');
-    const [modelName, setModelName] = useState(() => localStorage.getItem('modelName') || 'local-model');
-    const [maxTokens, setMaxTokens] = useState(() => Number(localStorage.getItem('maxTokens')) || 4096);
+    const [modelName, setModelName] = useState(() => localStorage.getItem('modelName') || 'qwen/qwen3.5-35b-a3b');
+    const [maxTokens, setMaxTokens] = useState(() => Number(localStorage.getItem('maxTokens')) || 10000);
     const [temperature, setTemperature] = useState(() => Number(localStorage.getItem('temperature')) || 0.7);
     const [provider, setProvider] = useState(() => localStorage.getItem('provider') || 'LM Studio');
 
     // Terminal Settings with persistence
-    const [termFontSize, setTermFontSize] = useState(() => clampTerminalFontSize(Number(localStorage.getItem('termFontSize')) || 14));
+    const [termFontSize, setTermFontSize] = useState(() => clampTerminalFontSize(Number(localStorage.getItem('termFontSize')) || 12));
     const [termFontFamily, setTermFontFamily] = useState(() => localStorage.getItem('termFontFamily') || '"Cascadia Code", Menlo, Monaco, "Courier New", monospace');
     const [termForeground, setTermForeground] = useState(() => localStorage.getItem('termForeground') || '#c0caf5');
     const [termBackground, setTermBackground] = useState(() => localStorage.getItem('termBackground') || '#000000');
 
     // Assistant Settings with persistence
-    const [chatFontSize, setChatFontSize] = useState(() => clampChatFontSize(Number(localStorage.getItem('chatFontSize')) || 14));
+    const [chatFontSize, setChatFontSize] = useState(() => clampChatFontSize(Number(localStorage.getItem('chatFontSize')) || 12));
     const [chatFontFamily, setChatFontFamily] = useState(() => {
         const saved = localStorage.getItem('chatFontFamily');
         if (!saved || saved.includes("Inter")) return 'system-ui, -apple-system, sans-serif';
         return saved;
     });
     const [chatWidth, setChatWidth] = useState(() => Number(localStorage.getItem('chatWidth')) || 450);
-    const [mcpPort, setMcpPort] = useState(() => Number(localStorage.getItem('mcpPort')) || 8080);
-    const [mcpLabel, setMcpLabel] = useState(() => localStorage.getItem('mcpLabel') || 'dinkisstyle-gateway');
+    const [mcpPort, setMcpPort] = useState(() => Number(localStorage.getItem('mcpPort')) || 4321);
+    const [mcpLabel, setMcpLabel] = useState(() => localStorage.getItem('mcpLabel') || 'dinkisstyle-terminal');
     const [blockedCommandPatterns, setBlockedCommandPatterns] = useState(() => localStorage.getItem('blockedCommandPatterns') || DEFAULT_BLOCKED_COMMAND_PATTERNS);
     const [approvalCommandPatterns, setApprovalCommandPatterns] = useState(() => localStorage.getItem('approvalCommandPatterns') || DEFAULT_APPROVAL_COMMAND_PATTERNS);
     const isResizing = useRef(false);
@@ -522,10 +522,10 @@ function App() {
     const [enabledTools, setEnabledTools] = useState<string[]>(() => {
         try {
             const saved = localStorage.getItem('enabledTools');
-            return saved ? JSON.parse(saved) : ['search_web', 'read_web_page', 'get_current_time', 'execute_command'];
+            return saved ? JSON.parse(saved) : ['search_web', 'read_web_page', 'get_current_time', 'execute_command', 'send_keys', 'read_terminal_tail', 'naver_search', 'namu_wiki'];
         } catch (e) {
             console.error("Error parsing enabledTools", e);
-            return ['search_web', 'read_web_page', 'get_current_time', 'execute_command'];
+            return ['search_web', 'read_web_page', 'get_current_time', 'execute_command', 'send_keys', 'read_terminal_tail', 'naver_search', 'namu_wiki'];
         }
     });
     const [pendingApproval, setPendingApproval] = useState<PendingCommandApproval | null>(null);
@@ -590,6 +590,8 @@ function App() {
     const chatEndRef = useRef<HTMLDivElement>(null);
     const [currentThinking, setCurrentThinking] = useState('');
     const [isThinking, setIsThinking] = useState(false);
+    const [availableModels, setAvailableModels] = useState<string[]>([]);
+    const [isFetchingModels, setIsFetchingModels] = useState(false);
 
     const openNewTab = () => {
         const newId = String(Date.now());
@@ -601,6 +603,25 @@ function App() {
         if (index < 0 || index >= tabs.length) return false;
         setActiveTabId(tabs[index].id);
         return true;
+    };
+
+    const handleFetchModels = async () => {
+        setIsFetchingModels(true);
+        try {
+            // @ts-ignore
+            const models = await window.go.main.App.FetchAvailableModels(apiUrl, apiKey);
+            setAvailableModels(models);
+            if (models.length === 0) {
+                alert("모델 목록은 받아왔지만 비어 있습니다. 서버 URL과 모델 서버 상태를 확인해 주세요.");
+            } else if (!models.includes(modelName)) {
+                setModelName(models[0]);
+            }
+        } catch (err) {
+            console.error("Failed to fetch models:", err);
+            alert("모델 목록을 가져오는데 실패했습니다. URL과 API Key를 확인해 주세요.");
+        } finally {
+            setIsFetchingModels(false);
+        }
     };
 
     useEffect(() => {
@@ -1380,7 +1401,12 @@ Current OS: ${window.navigator.platform}`;
                             <button className="add-tab-btn" onClick={addTab} title="New Tab">+</button>
                         </div>
                         <div className="header-actions">
-                            <button className="icon-btn" title="Settings" onClick={() => setIsSettingsOpen(true)}>
+                            <button className="icon-btn" title="Settings" onClick={() => {
+                                setIsSettingsOpen(true);
+                                if (provider === 'LM Studio' && availableModels.length === 0) {
+                                    handleFetchModels();
+                                }
+                            }}>
                                 <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
                             </button>
                         </div>
@@ -1485,15 +1511,39 @@ Current OS: ${window.navigator.platform}`;
                                     <div className="settings-grid">
                                         <div className="settings-field full">
                                             <label>Server URL</label>
-                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://127.0.0.1:1234/v1" {...textAssistOffProps} />
+                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="127.0.0.1:1234" {...textAssistOffProps} />
                                         </div>
                                         <div className="settings-field full">
-                                            <label>API Key (Optional)</label>
+                                            <label>API Key (필수)</label>
                                             <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="OpenAI or Local key" {...textAssistOffProps} />
                                         </div>
                                         <div className="settings-field full">
                                             <label>Model Key</label>
-                                            <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} {...textAssistOffProps} />
+                                            <div className="model-selection-group">
+                                                {provider === 'LM Studio' && availableModels.length > 0 ? (
+                                                    <select
+                                                        value={modelName}
+                                                        onChange={e => setModelName(e.target.value)}
+                                                        className="model-select"
+                                                    >
+                                                        {availableModels.map(m => (
+                                                            <option key={m} value={m}>{m}</option>
+                                                        ))}
+                                                    </select>
+                                                ) : (
+                                                    <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} {...textAssistOffProps} />
+                                                )}
+                                                {provider === 'LM Studio' && (
+                                                    <button
+                                                        className="refresh-models-btn"
+                                                        onClick={handleFetchModels}
+                                                        disabled={isFetchingModels}
+                                                        title="사용 가능한 모델 목록 가져오기"
+                                                    >
+                                                        {isFetchingModels ? '...' : 'Fetch'}
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
                                         <div className="settings-field"><label>Max Tokens</label><input type="number" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} /></div>
                                         <div className="settings-field"><label>Temperature</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>

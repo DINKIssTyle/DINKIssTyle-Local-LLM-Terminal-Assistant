@@ -6,6 +6,10 @@ export function CallTool(arg1, arg2) {
   return window['go']['main']['App']['CallTool'](arg1, arg2);
 }
 
+export function FetchAvailableModels(arg1, arg2) {
+  return window['go']['main']['App']['FetchAvailableModels'](arg1, arg2);
+}
+
 export function FetchLLMResponse(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
   return window['go']['main']['App']['FetchLLMResponse'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
 }
@@ -16,6 +20,10 @@ export function GetTools() {
 
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
+}
+
+export function LoadModel(arg1, arg2, arg3) {
+  return window['go']['main']['App']['LoadModel'](arg1, arg2, arg3);
 }
 
 export function ReadActiveTerminalTail(arg1, arg2, arg3) {

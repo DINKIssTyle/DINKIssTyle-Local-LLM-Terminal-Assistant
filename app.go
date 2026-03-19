@@ -179,6 +179,17 @@ func unwrapWindowsPowerShellCommand(command string) string {
 	return trimmed
 }
 
+func normalizeAPIBaseURL(raw string) string {
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
+		return normalized
+	}
+	if !strings.HasPrefix(normalized, "http://") && !strings.HasPrefix(normalized, "https://") {
+		normalized = "http://" + normalized
+	}
+	return strings.TrimSuffix(normalized, "/")
+}
+
 func terminalCommandSuffix() string {
 	return "\r"
 }
@@ -449,11 +460,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		cancel()
 	}()
 
-	url := apiURL
-	// Add protocol if missing
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		url = "http://" + url
-	}
+	url := normalizeAPIBaseURL(apiURL)
 
 	// Handle provider specific paths
 	if provider == "LM Studio" || provider == "Ollama" {
@@ -576,6 +583,117 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 	}
 
 	return "", fmt.Errorf("empty response from LLM")
+}
+
+func (a *App) FetchAvailableModels(apiURL string, apiKey string) ([]string, error) {
+	endpoint := normalizeAPIBaseURL(apiURL)
+	endpoint = strings.TrimSuffix(endpoint, "/v1")
+	modelEndpoints := []string{
+		endpoint + "/v1/models",
+		endpoint + "/api/v1/models",
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	var lastErr error
+
+	for _, modelsURL := range modelEndpoints {
+		log.Printf("[App] Fetching models from: %s", modelsURL)
+
+		req, err := http.NewRequest("GET", modelsURL, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to create request for %s: %v", modelsURL, err)
+			continue
+		}
+
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("connection failed for %s: %v", modelsURL, err)
+			continue
+		}
+
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = fmt.Errorf("failed to read body from %s: %v", modelsURL, readErr)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("server returned HTTP %d from %s: %s", resp.StatusCode, modelsURL, string(bodyBytes))
+			continue
+		}
+
+		var result struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			lastErr = fmt.Errorf("failed to parse models JSON from %s: %v", modelsURL, err)
+			continue
+		}
+
+		models := make([]string, 0, len(result.Data))
+		for _, m := range result.Data {
+			if strings.TrimSpace(m.ID) == "" {
+				continue
+			}
+			models = append(models, m.ID)
+		}
+
+		log.Printf("[App] Successfully fetched %d models from %s", len(models), modelsURL)
+		return models, nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	return nil, fmt.Errorf("failed to fetch models from known endpoints")
+}
+
+// LoadModel requests LM Studio to load a specific model
+func (a *App) LoadModel(apiURL string, apiKey string, modelID string) error {
+	endpoint := strings.TrimSuffix(apiURL, "/")
+	endpoint = strings.TrimSuffix(endpoint, "/v1")
+	loadURL := endpoint + "/v1/models/load"
+
+	log.Printf("[App] Requesting load for model: %s to %s", modelID, loadURL)
+
+	payload := map[string]interface{}{
+		"model": modelID,
+	}
+	body, _ := json.Marshal(payload)
+
+	client := &http.Client{Timeout: 60 * time.Second} // Loading can take time
+	req, err := http.NewRequest("POST", loadURL, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	log.Printf("[App] Successfully loaded model: %s", modelID)
+	return nil
 }
 
 // Greet returns a greeting for the given name

@@ -4,11 +4,15 @@ import {mcp} from '../models';
 
 export function CallTool(arg1:string,arg2:string):Promise<string>;
 
+export function FetchAvailableModels(arg1:string,arg2:string):Promise<Array<string>>;
+
 export function FetchLLMResponse(arg1:string,arg2:string,arg3:string,arg4:number,arg5:number,arg6:string,arg7:boolean,arg8:Array<any>):Promise<string>;
 
 export function GetTools():Promise<Array<mcp.Tool>>;
 
 export function Greet(arg1:string):Promise<string>;
+
+export function LoadModel(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function ReadActiveTerminalTail(arg1:number,arg2:number,arg3:number):Promise<string>;
 
