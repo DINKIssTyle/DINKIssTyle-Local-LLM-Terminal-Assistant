@@ -263,6 +263,11 @@ const clampTerminalFontSize = (value: number): number => {
     return Math.min(24, Math.max(10, Math.round(value)));
 };
 
+const clampChatFontSize = (value: number): number => {
+    if (!Number.isFinite(value)) return 14;
+    return Math.min(28, Math.max(10, Math.round(value)));
+};
+
 interface PendingCommandApproval {
     command: string;
     toolName: 'execute_command' | 'send_keys';
@@ -322,7 +327,7 @@ function App() {
     const [termBackground, setTermBackground] = useState(() => localStorage.getItem('termBackground') || '#000000');
 
     // Assistant Settings with persistence
-    const [chatFontSize, setChatFontSize] = useState(() => Number(localStorage.getItem('chatFontSize')) || 14);
+    const [chatFontSize, setChatFontSize] = useState(() => clampChatFontSize(Number(localStorage.getItem('chatFontSize')) || 14));
     const [chatFontFamily, setChatFontFamily] = useState(() => {
         const saved = localStorage.getItem('chatFontFamily');
         if (!saved || saved.includes("Inter")) return 'system-ui, -apple-system, sans-serif';
@@ -346,6 +351,12 @@ function App() {
         }
     });
     const [pendingApproval, setPendingApproval] = useState<PendingCommandApproval | null>(null);
+    const textAssistOffProps = {
+        autoComplete: 'off',
+        autoCorrect: 'off' as const,
+        autoCapitalize: 'off' as const,
+        spellCheck: false,
+    };
 
     useEffect(() => {
         localStorage.setItem('apiUrl', apiUrl);
@@ -413,10 +424,26 @@ function App() {
         window.addEventListener('open-artifact', (e: any) => {
             alert("Opening artifact: " + e.detail);
         });
+
+        const handleFontZoom = (event: KeyboardEvent) => {
+            if (!(event.metaKey || event.ctrlKey)) return;
+
+            const isZoomIn = event.key === '+' || event.key === '=' || event.code === 'NumpadAdd';
+            const isZoomOut = event.key === '-' || event.key === '_' || event.code === 'NumpadSubtract';
+            if (!isZoomIn && !isZoomOut) return;
+
+            event.preventDefault();
+            const delta = isZoomIn ? 1 : -1;
+            setTermFontSize(prev => clampTerminalFontSize(prev + delta));
+            setChatFontSize(prev => clampChatFontSize(prev + delta));
+        };
+
+        window.addEventListener('keydown', handleFontZoom);
         return () => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
             window.removeEventListener('open-artifact', (e: any) => { });
+            window.removeEventListener('keydown', handleFontZoom);
             fitTimeoutsRef.current.forEach(timeout => window.clearTimeout(timeout));
         };
     }, []);
@@ -1021,13 +1048,14 @@ Current OS: ${window.navigator.platform}`;
                         </div>
                     </div>
                     <div className="chat-input-area">
-                        <div className="input-wrapper">
+                        <div className="input-wrapper" style={{ fontSize: `${chatFontSize}px`, fontFamily: chatFontFamily }}>
                             <textarea
                                 className="chat-input"
                                 placeholder="메시지를 입력하세요..."
                                 value={inputText}
                                 onChange={e => setInputText(e.target.value)}
                                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+                                {...textAssistOffProps}
                             ></textarea>
                             {isLoading ? (
                                 <button className="stop-btn" onClick={handleStop} title="정지" aria-label="정지">
@@ -1060,15 +1088,15 @@ Current OS: ${window.navigator.platform}`;
                                     <div className="settings-grid">
                                         <div className="settings-field full">
                                             <label>Server URL</label>
-                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://127.0.0.1:1234/v1" />
+                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://127.0.0.1:1234/v1" {...textAssistOffProps} />
                                         </div>
                                         <div className="settings-field full">
                                             <label>API Key (Optional)</label>
-                                            <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="OpenAI or Local key" />
+                                            <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="OpenAI or Local key" {...textAssistOffProps} />
                                         </div>
                                         <div className="settings-field full">
                                             <label>Model Key</label>
-                                            <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} />
+                                            <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} {...textAssistOffProps} />
                                         </div>
                                         <div className="settings-field"><label>Max Tokens</label><input type="number" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} /></div>
                                         <div className="settings-field"><label>Temperature</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>
@@ -1083,15 +1111,15 @@ Current OS: ${window.navigator.platform}`;
                                 <div className="settings-section">
                                     <h4>Assistant Appearance</h4>
                                     <div className="settings-grid">
-                                        <div className="settings-field"><label>FontSize</label><input type="number" value={chatFontSize} onChange={e => setChatFontSize(Number(e.target.value))} /></div>
-                                        <div className="settings-field"><label>FontFamily</label><input type="text" value={chatFontFamily} onChange={e => setChatFontFamily(e.target.value)} /></div>
+                                        <div className="settings-field"><label>FontSize</label><input type="number" min="10" max="28" value={chatFontSize} onChange={e => setChatFontSize(clampChatFontSize(Number(e.target.value)))} /></div>
+                                        <div className="settings-field"><label>FontFamily</label><input type="text" value={chatFontFamily} onChange={e => setChatFontFamily(e.target.value)} {...textAssistOffProps} /></div>
                                     </div>
                                 </div>
                                 <div className="settings-section">
                                     <h4>Terminal Appearance</h4>
                                     <div className="settings-grid">
                                         <div className="settings-field"><label>FontSize</label><input type="number" min="10" max="24" value={termFontSize} onChange={e => setTermFontSize(clampTerminalFontSize(Number(e.target.value)))} /></div>
-                                        <div className="settings-field"><label>FontFamily</label><input type="text" value={termFontFamily} onChange={e => setTermFontFamily(e.target.value)} /></div>
+                                        <div className="settings-field"><label>FontFamily</label><input type="text" value={termFontFamily} onChange={e => setTermFontFamily(e.target.value)} {...textAssistOffProps} /></div>
                                         <div className="settings-field"><label>Foreground</label><input type="color" value={termForeground} onChange={e => setTermForeground(e.target.value)} /></div>
                                         <div className="settings-field"><label>Background</label><input type="color" value={termBackground} onChange={e => setTermBackground(e.target.value)} /></div>
                                     </div>
@@ -1105,7 +1133,7 @@ Current OS: ${window.navigator.platform}`;
                                         </div>
                                         <div className="settings-field">
                                             <label>MCP Server Label</label>
-                                            <input type="text" value={mcpLabel} onChange={e => setMcpLabel(e.target.value)} />
+                                            <input type="text" value={mcpLabel} onChange={e => setMcpLabel(e.target.value)} {...textAssistOffProps} />
                                             <span style={{ fontSize: '10px', opacity: 0.5 }}>LM Studio의 mcp.json에 설정할 라벨입니다.</span>
                                         </div>
                                     </div>
@@ -1133,6 +1161,7 @@ Current OS: ${window.navigator.platform}`;
                                                 className="settings-textarea"
                                                 value={blockedCommandPatterns}
                                                 onChange={e => setBlockedCommandPatterns(e.target.value)}
+                                                {...textAssistOffProps}
                                             />
                                             <span style={{ fontSize: '10px', opacity: 0.6 }}>한 줄에 하나씩 입력하세요. 일치하면 앱이 LLM 실행 전에 차단합니다.</span>
                                         </div>
@@ -1145,6 +1174,7 @@ Current OS: ${window.navigator.platform}`;
                                                 className="settings-textarea"
                                                 value={approvalCommandPatterns}
                                                 onChange={e => setApprovalCommandPatterns(e.target.value)}
+                                                {...textAssistOffProps}
                                             />
                                             <span style={{ fontSize: '10px', opacity: 0.6 }}>한 줄에 하나씩 입력하세요. 일치하면 채팅창에서 취소/실행 승인을 요청합니다.</span>
                                         </div>

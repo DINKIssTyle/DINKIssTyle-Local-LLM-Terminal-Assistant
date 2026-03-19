@@ -695,13 +695,24 @@ select {
     padding: 9px 12px;
     border: none;
     resize: none;
+    appearance: none;
+    -webkit-appearance: none;
     background: transparent;
     color: var(--text-color);
     line-height: 1.5;
+    outline: none;
+    box-shadow: none;
 }
 
 .chat-input::placeholder {
     color: var(--text-subtle);
+}
+
+.chat-input:focus,
+.chat-input:focus-visible {
+    outline: none;
+    box-shadow: none;
+    border: none;
 }
 
 .send-btn,
