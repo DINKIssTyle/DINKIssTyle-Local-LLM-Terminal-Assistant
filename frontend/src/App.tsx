@@ -205,6 +205,50 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
+    html = html.replace(/\[TOOL:\s*execute_command\s*({[\s\S]*?})\s*\]/gi, (_, payloadJson) => {
+        try {
+            const payload = JSON.parse(payloadJson);
+            const command = typeof payload.command === 'string' ? payload.command.trim() : payloadJson.trim();
+            return stash(`<section class="message-block command-block">
+                <div class="command-header">
+                    <span>Run In Terminal</span>
+                    <span class="progress-meta">Action</span>
+                </div>
+                <div class="command-body"><code>${escapeHtml(command)}</code></div>
+            </section>`);
+        } catch {
+            return stash(`<section class="message-block command-block">
+                <div class="command-header">
+                    <span>Run In Terminal</span>
+                    <span class="progress-meta">Action</span>
+                </div>
+                <div class="command-body"><code>${escapeHtml(payloadJson.trim())}</code></div>
+            </section>`);
+        }
+    });
+
+    html = html.replace(/\[TOOL:\s*send_keys\s*({[\s\S]*?})\s*\]/gi, (_, payloadJson) => {
+        try {
+            const payload = JSON.parse(payloadJson);
+            const keys = Array.isArray(payload.keys) ? JSON.stringify(payload.keys) : payloadJson.trim();
+            return stash(`<section class="message-block command-block">
+                <div class="command-header">
+                    <span>Send Keys</span>
+                    <span class="progress-meta">Action</span>
+                </div>
+                <div class="command-body"><code>${escapeHtml(keys)}</code></div>
+            </section>`);
+        } catch {
+            return stash(`<section class="message-block command-block">
+                <div class="command-header">
+                    <span>Send Keys</span>
+                    <span class="progress-meta">Action</span>
+                </div>
+                <div class="command-body"><code>${escapeHtml(payloadJson.trim())}</code></div>
+            </section>`);
+        }
+    });
+
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, language, code) => {
         return stash(`<pre><code class="language-${escapeHtml(language || 'plain')}">${escapeHtml(code.trim())}</code></pre>`);
     });
@@ -291,10 +335,101 @@ const normalizeShortcutTokens = (keys: string[]): string[] => (
     keys.map(key => key.trim().toUpperCase()).filter(Boolean)
 );
 
+type ParsedToolCall = {
+    raw: string;
+    toolName: 'execute_command' | 'send_keys';
+    commandText: string;
+    parsedKeys: string[];
+    toolArgs: string;
+};
+
+const parseSendKeysPayload = (payload: string): string[] | null => {
+    try {
+        const parsed = JSON.parse(payload);
+        if (!Array.isArray(parsed) || !parsed.every(item => typeof item === 'string')) {
+            return null;
+        }
+        return parsed;
+    } catch {
+        return null;
+    }
+};
+
+const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
+    const executeRegex = />>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
+    const sendKeysRegex = />>>\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
+    const bracketToolRegex = /\[TOOL:\s*(execute_command|send_keys)\s*({[\s\S]*?})\s*\]/i;
+
+    const commandMatch = response.match(executeRegex);
+    if (commandMatch) {
+        const command = commandMatch[1];
+        return {
+            raw: commandMatch[0],
+            toolName: 'execute_command',
+            commandText: command,
+            parsedKeys: [],
+            toolArgs: JSON.stringify({ command }),
+        };
+    }
+
+    const keyMatch = response.match(sendKeysRegex);
+    if (keyMatch) {
+        const parsedKeys = parseSendKeysPayload(keyMatch[1]) || [];
+        return {
+            raw: keyMatch[0],
+            toolName: 'send_keys',
+            commandText: keyMatch[1],
+            parsedKeys,
+            toolArgs: JSON.stringify({ keys: parsedKeys }),
+        };
+    }
+
+    const bracketMatch = response.match(bracketToolRegex);
+    if (!bracketMatch) return null;
+
+    try {
+        const toolName = bracketMatch[1].toLowerCase() as 'execute_command' | 'send_keys';
+        const payload = JSON.parse(bracketMatch[2]);
+        if (toolName === 'execute_command' && typeof payload.command === 'string') {
+            return {
+                raw: bracketMatch[0],
+                toolName,
+                commandText: payload.command,
+                parsedKeys: [],
+                toolArgs: JSON.stringify({ command: payload.command }),
+            };
+        }
+
+        if (toolName === 'send_keys' && Array.isArray(payload.keys) && payload.keys.every((item: unknown) => typeof item === 'string')) {
+            return {
+                raw: bracketMatch[0],
+                toolName,
+                commandText: JSON.stringify(payload.keys),
+                parsedKeys: payload.keys,
+                toolArgs: JSON.stringify({ keys: payload.keys }),
+            };
+        }
+    } catch {
+        return null;
+    }
+
+    return null;
+};
+
 const isAppNewTabShortcut = (keys: string[]): boolean => {
     const normalized = normalizeShortcutTokens(keys);
     const hasModifier = normalized.includes('CTRL') || normalized.includes('CONTROL') || normalized.includes('CMD') || normalized.includes('COMMAND') || normalized.includes('META');
     return hasModifier && normalized.includes('SHIFT') && normalized.includes('T');
+};
+
+const getAppTabSwitchIndex = (keys: string[]): number | null => {
+    const normalized = normalizeShortcutTokens(keys);
+    const hasModifier = normalized.includes('CTRL') || normalized.includes('CONTROL') || normalized.includes('CMD') || normalized.includes('COMMAND') || normalized.includes('META') || normalized.includes('OS') || normalized.includes('SUPER') || normalized.includes('WIN') || normalized.includes('WINDOWS');
+    if (!hasModifier) return null;
+
+    const digit = normalized.find(token => /^[0-9]$/.test(token));
+    if (!digit) return null;
+    return digit === '0' ? 9 : Number(digit) - 1;
 };
 
 const ReasoningBox = ({ content, isThinking }: { content: string, isThinking: boolean }) => {
@@ -439,6 +574,12 @@ function App() {
         setActiveTabId(newId);
     };
 
+    const switchToTabIndex = (index: number) => {
+        if (index < 0 || index >= tabs.length) return false;
+        setActiveTabId(tabs[index].id);
+        return true;
+    };
+
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
             if (!isResizing.current) return;
@@ -455,6 +596,12 @@ function App() {
         window.addEventListener('mouseup', handleMouseUp);
         window.addEventListener('open-artifact', (e: any) => {
             alert("Opening artifact: " + e.detail);
+        });
+        const unlistenNewTab = EventsOn("app:new-tab", () => {
+            openNewTab();
+        });
+        const unlistenSwitchTab = EventsOn("app:switch-tab", (index: number) => {
+            switchToTabIndex(Number(index));
         });
 
         const handleFontZoom = (event: KeyboardEvent) => {
@@ -481,6 +628,13 @@ function App() {
             if (isAppNewTabShortcut(normalizedKeys)) {
                 event.preventDefault();
                 openNewTab();
+                return;
+            }
+
+            const tabIndex = getAppTabSwitchIndex(normalizedKeys);
+            if (tabIndex !== null) {
+                event.preventDefault();
+                switchToTabIndex(tabIndex);
             }
         };
 
@@ -490,11 +644,13 @@ function App() {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
             window.removeEventListener('open-artifact', (e: any) => { });
+            unlistenNewTab();
+            unlistenSwitchTab();
             window.removeEventListener('keydown', handleFontZoom);
             window.removeEventListener('keydown', handleAppShortcuts);
             fitTimeoutsRef.current.forEach(timeout => window.clearTimeout(timeout));
         };
-    }, []);
+    }, [tabs]);
 
     useEffect(() => {
         const unoffChunk = EventsOn("llm:chunk", (chunk: string) => {
@@ -789,22 +945,18 @@ function App() {
         });
     };
 
-    const parseSendKeysPayload = (payload: string): string[] | null => {
-        try {
-            const parsed = JSON.parse(payload);
-            if (!Array.isArray(parsed) || !parsed.every(item => typeof item === 'string')) {
-                return null;
-            }
-            return parsed;
-        } catch {
-            return null;
-        }
-    };
-
     const handleAppLevelSendKeys = (keys: string[]): string | null => {
         if (isAppNewTabShortcut(keys)) {
             openNewTab();
             return 'Opened a new app tab via shortcut.';
+        }
+
+        const tabIndex = getAppTabSwitchIndex(keys);
+        if (tabIndex !== null) {
+            if (switchToTabIndex(tabIndex)) {
+                return `Switched to app tab ${tabIndex + 1} via shortcut.`;
+            }
+            return `Tab ${tabIndex + 1} does not exist.`;
         }
 
         return null;
@@ -944,28 +1096,16 @@ Current OS: ${window.navigator.platform}`;
                 setIsThinking(false);
             }
 
-            // Ultra-simple regex for local LLMs: >>> EXECUTE_COMMAND: "cmd" <<< or >>> SEND_KEYS: ["ESC"] <<<
-            const toolRegex = />>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
-            const sendKeysRegex = />>>\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
-
             while (true) {
-                const commandMatch = response.match(toolRegex);
-                const keyMatch = response.match(sendKeysRegex);
-                const match = commandMatch || keyMatch;
-                if (match) {
-                    const isSendKeys = Boolean(keyMatch && match === keyMatch);
-                    const toolName: 'execute_command' | 'send_keys' = isSendKeys ? 'send_keys' : 'execute_command';
-                    const commandText = isSendKeys ? match[1] : match[1];
-                    const parsedKeys = isSendKeys ? (parseSendKeysPayload(match[1]) || []) : [];
-                    const toolArgs = isSendKeys
-                        ? JSON.stringify({ keys: parsedKeys })
-                        : JSON.stringify({ command: match[1] });
+                const parsedToolCall = parseToolCallFromResponse(response);
+                if (parsedToolCall) {
+                    const { raw, toolName, commandText, parsedKeys, toolArgs } = parsedToolCall;
                     const commandPolicy = classifyCommand(commandText);
 
                     // Filter out the tool call from the response to prevent loops and show only final text
-                    response = response.replace(match[0], '').trim();
+                    response = response.replace(raw, '').trim();
 
-                    if (!isSendKeys && commandPolicy.status === 'blocked') {
+                    if (toolName === 'execute_command' && commandPolicy.status === 'blocked') {
                         commandIntercepted = true;
                         setMessages(prev => [...prev, {
                             role: 'system',
@@ -980,7 +1120,7 @@ Current OS: ${window.navigator.platform}`;
                         break;
                     }
 
-                    if (!isSendKeys && commandPolicy.status === 'approval') {
+                    if (toolName === 'execute_command' && commandPolicy.status === 'approval') {
                         commandIntercepted = true;
                         setPendingApproval({
                             command: commandText,
@@ -1006,14 +1146,14 @@ Current OS: ${window.navigator.platform}`;
                     setMessages(prev => [...prev, { role: 'system', content: `🔧 Executing ${toolName}...` }]);
 
                     try {
-                        const result = isSendKeys
+                        const result = toolName === 'send_keys'
                             ? (handleAppLevelSendKeys(parsedKeys) ?? await CallTool(toolName, toolArgs))
                             : await CallTool(toolName, toolArgs);
                         console.log(`[MCP] Tool ${toolName} result:`, result);
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
-                            content: `${isSendKeys ? 'Keys' : 'Command'}: \`${commandText}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
+                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${commandText}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
                         };
                         setMessages(prev => [...prev, toolResultForUi]);
                         ensureAssistantPlaceholder();

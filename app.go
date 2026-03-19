@@ -22,11 +22,90 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+func normalizeShortcutTokens(keys []string) []string {
+	normalized := make([]string, 0, len(keys))
+	for _, key := range keys {
+		token := strings.ToUpper(strings.TrimSpace(key))
+		if token == "" {
+			continue
+		}
+		switch token {
+		case "CONTROL":
+			token = "CTRL"
+		case "COMMAND", "META", "OS", "SUPER", "WIN", "WINDOWS":
+			token = "CMD"
+		}
+		normalized = append(normalized, token)
+	}
+	return normalized
+}
+
+func isAppNewTabShortcut(keys []string) bool {
+	normalized := normalizeShortcutTokens(keys)
+	hasModifier := false
+	hasShift := false
+	hasT := false
+
+	for _, token := range normalized {
+		switch token {
+		case "CTRL", "CMD":
+			hasModifier = true
+		case "SHIFT":
+			hasShift = true
+		case "T":
+			hasT = true
+		}
+	}
+
+	return hasModifier && hasShift && hasT
+}
+
+func appTabSwitchIndex(keys []string) (int, bool) {
+	normalized := normalizeShortcutTokens(keys)
+	hasModifier := false
+	digit := ""
+
+	for _, token := range normalized {
+		switch token {
+		case "CTRL", "CMD":
+			hasModifier = true
+		case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			digit = token
+		}
+	}
+
+	if !hasModifier || digit == "" {
+		return 0, false
+	}
+
+	if digit == "0" {
+		return 9, true
+	}
+
+	return int(digit[0]-'1'), true
+}
+
+func ctrlByteForToken(token string) (byte, bool) {
+	normalized := strings.ToUpper(strings.TrimSpace(token))
+	switch {
+	case strings.HasPrefix(normalized, "CTRL_") && len(normalized) == len("CTRL_")+1:
+		return normalized[len("CTRL_")] & 0x1f, true
+	case strings.HasPrefix(normalized, "^") && len(normalized) == 2:
+		return normalized[1] & 0x1f, true
+	default:
+		return 0, false
+	}
+}
+
 func encodeTerminalKeys(keys []string) (string, error) {
 	var builder strings.Builder
 
 	for _, key := range keys {
 		normalized := strings.ToUpper(strings.TrimSpace(key))
+		if ctrlByte, ok := ctrlByteForToken(normalized); ok {
+			builder.WriteByte(ctrlByte)
+			continue
+		}
 		switch normalized {
 		case "ESC":
 			builder.WriteByte(0x1b)
@@ -55,6 +134,9 @@ func encodeTerminalKeys(keys []string) (string, error) {
 		default:
 			if key == "" {
 				return "", fmt.Errorf("empty key sequence")
+			}
+			if normalized == "CTRL" || normalized == "SHIFT" || normalized == "CMD" || normalized == "ALT" || normalized == "OPTION" {
+				continue
 			}
 			builder.WriteString(key)
 		}
@@ -107,6 +189,15 @@ func (a *App) startup(ctx context.Context) {
 		return fmt.Sprintf("Command '%s' sent to active terminal (Tab ID: %s)", command, activeId), nil
 	}
 	mcp.TerminalKeyExecutor = func(keys []string) (string, error) {
+		if isAppNewTabShortcut(keys) {
+			runtime.EventsEmit(a.ctx, "app:new-tab")
+			return fmt.Sprintf("Opened a new app tab via shortcut %v", keys), nil
+		}
+		if tabIndex, ok := appTabSwitchIndex(keys); ok {
+			runtime.EventsEmit(a.ctx, "app:switch-tab", tabIndex)
+			return fmt.Sprintf("Switched to app tab index %d via shortcut %v", tabIndex, keys), nil
+		}
+
 		a.mu.Lock()
 		activeId := a.activeTabId
 		a.mu.Unlock()
