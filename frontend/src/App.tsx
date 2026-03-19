@@ -249,6 +249,32 @@ function renderMarkdown(text: string): string {
         }
     });
 
+    html = html.replace(/\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*({[\s\S]*?})\s*\]/gi, (_, toolName, payloadJson) => {
+        const normalizedToolName = String(toolName || '').trim();
+        if (!normalizedToolName || normalizedToolName === 'execute_command' || normalizedToolName === 'send_keys') {
+            return _;
+        }
+
+        let displayValue = payloadJson.trim();
+        try {
+            const payload = JSON.parse(payloadJson);
+            if (typeof payload.query === 'string') displayValue = payload.query;
+            else if (typeof payload.url === 'string') displayValue = payload.url;
+            else if (typeof payload.keyword === 'string') displayValue = payload.keyword;
+            else displayValue = JSON.stringify(payload);
+        } catch {
+            // noop
+        }
+
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>${escapeHtml(normalizedToolName.replace(/_/g, ' '))}</span>
+                <span class="progress-meta">Tool</span>
+            </div>
+            <div class="command-body"><code>${escapeHtml(displayValue)}</code></div>
+        </section>`);
+    });
+
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, language, code) => {
         return stash(`<pre><code class="language-${escapeHtml(language || 'plain')}">${escapeHtml(code.trim())}</code></pre>`);
     });
@@ -337,7 +363,7 @@ const normalizeShortcutTokens = (keys: string[]): string[] => (
 
 type ParsedToolCall = {
     raw: string;
-    toolName: 'execute_command' | 'send_keys';
+    toolName: string;
     commandText: string;
     parsedKeys: string[];
     toolArgs: string;
@@ -366,7 +392,7 @@ const parseSendKeysPayload = (payload: string): string[] | null => {
 const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const executeRegex = />>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
     const sendKeysRegex = />>>\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
-    const bracketToolRegex = /\[TOOL:\s*(execute_command|send_keys)\s*({[\s\S]*?})\s*\]/i;
+    const bracketToolRegex = /\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*({[\s\S]*?})\s*\]/i;
 
     const commandMatch = response.match(executeRegex);
     if (commandMatch) {
@@ -396,7 +422,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     if (!bracketMatch) return null;
 
     try {
-        const toolName = bracketMatch[1].toLowerCase() as 'execute_command' | 'send_keys';
+        const toolName = bracketMatch[1].toLowerCase();
         const payload = JSON.parse(bracketMatch[2]);
         if (toolName === 'execute_command' && typeof payload.command === 'string') {
             return {
@@ -415,6 +441,24 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
                 commandText: JSON.stringify(payload.keys),
                 parsedKeys: payload.keys,
                 toolArgs: JSON.stringify({ keys: payload.keys }),
+            };
+        }
+
+        if (payload && typeof payload === 'object') {
+            const summarizedArgument = typeof payload.query === 'string'
+                ? payload.query
+                : typeof payload.url === 'string'
+                    ? payload.url
+                    : typeof payload.keyword === 'string'
+                        ? payload.keyword
+                        : JSON.stringify(payload);
+
+            return {
+                raw: bracketMatch[0],
+                toolName,
+                commandText: summarizedArgument,
+                parsedKeys: [],
+                toolArgs: JSON.stringify(payload),
             };
         }
     } catch {
@@ -1089,7 +1133,7 @@ function App() {
         return toolName !== 'execute_command' && toolName !== 'send_keys';
     };
 
-    const buildTerminalToolSummary = (toolName: 'execute_command' | 'send_keys', commandText: string, responseSansCommand: string) => {
+    const buildTerminalToolSummary = (toolName: string, commandText: string, responseSansCommand: string) => {
         if (responseSansCommand) {
             return responseSansCommand;
         }
@@ -1098,11 +1142,15 @@ function App() {
             return `\`${commandText}\` 명령을 터미널로 보냈습니다. 결과는 왼쪽 터미널에서 확인하세요.`;
         }
 
-        return '터미널에 키 입력을 전송했습니다.';
+        if (toolName === 'send_keys') {
+            return '터미널에 키 입력을 전송했습니다.';
+        }
+
+        return `\`${toolName}\` 도구를 실행했습니다.`;
     };
 
     const inspectTerminalIfNeeded = async (
-        toolName: 'execute_command' | 'send_keys',
+        toolName: string,
         commandText: string,
         historyToSend: Message[],
         baseSystemPrompt: string,
@@ -1254,13 +1302,20 @@ function App() {
    >>> EXECUTE_COMMAND: "YOUR_COMMAND" <<<
    To send terminal key presses, YOU MUST output this EXACT line:
    >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
+   To call any other MCP tool such as search_web, read_web_page, get_current_time, naver_search, or namu_wiki, YOU MUST output this EXACT format:
+   [TOOL: tool_name {"arg":"value"}]
    
 Example: To check the home folder, output:
 >>> EXECUTE_COMMAND: "cd ~ && ls" <<<
 Example: To exit vim without saving, output:
 >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
+Example: To search the web, output:
+[TOOL: search_web {"query":"Apple M4 Pro GPU benchmark"}]
+Example: To read a page, output:
+[TOOL: read_web_page {"url":"https://example.com"}]
 
 ALWAYS use the tool when the user asks for terminal actions.
+If the user asks for latest web information, website verification, or online reading, use search_web and read_web_page instead of saying web browsing is unavailable.
 If the user asks to count files, inspect directories, verify paths, read files, or confirm system state, use terminal commands even if something similar is visible in SCREEN_CONTEXT.
 When Current OS indicates Windows, assume the terminal shell is PowerShell. Use PowerShell syntax only. Do not use cmd.exe or batch syntax such as \`if exist\`, \`dir /b\`, \`copy\`, \`del\`, \`type\`, \`set VAR=\`, or \`%VAR%\`.
 4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.
