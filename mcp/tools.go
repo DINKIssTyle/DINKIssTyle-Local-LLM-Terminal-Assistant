@@ -154,6 +154,10 @@ func ReadPage(pageURL string) (string, error) {
 func ExecuteCommand(command string) (string, error) {
 	log.Printf("[MCP] ExecuteCommand: %s", command)
 
+	if TerminalExecutor != nil {
+		return TerminalExecutor(command)
+	}
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/C", command)

@@ -16,6 +16,8 @@ export function SetActiveTab(arg1:string):Promise<void>;
 
 export function StartTerminal(arg1:string):Promise<void>;
 
+export function StopLLMResponse():Promise<void>;
+
 export function StopTerminal(arg1:string):Promise<void>;
 
 export function UpdateMCPSettings(arg1:number,arg2:string):Promise<void>;

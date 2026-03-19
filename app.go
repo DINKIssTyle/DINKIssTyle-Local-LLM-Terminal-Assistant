@@ -31,6 +31,7 @@ type App struct {
 	mcpLabel    string
 	mcpServer   *MCPServer
 	mu          sync.Mutex
+	cancelFunc  context.CancelFunc
 }
 
 // NewApp creates a new App application struct
@@ -169,8 +170,34 @@ func (a *App) CallTool(name string, arguments string) (string, error) {
 	return mcp.ExecuteToolByName(name, arguments)
 }
 
+// StopLLMResponse cancels the current LLM request
+func (a *App) StopLLMResponse() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancelFunc != nil {
+		a.cancelFunc()
+		a.cancelFunc = nil
+		log.Println("[App] LLM Response stopped by user")
+	}
+}
+
 // FetchLLMResponse makes a call to the local or remote LLM API
 func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, maxTokens int, temperature float64, provider string, isStreaming bool, messages []interface{}) (string, error) {
+	log.Printf("[LLM] Fetching response from %s (Model: %s, Streaming: %v)", apiURL, modelName, isStreaming)
+	// Cancel any existing request before starting a new one
+	a.StopLLMResponse()
+
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.mu.Lock()
+	a.cancelFunc = cancel
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.cancelFunc = nil
+		a.mu.Unlock()
+		cancel()
+	}()
+
 	url := apiURL
 	// Add protocol if missing
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
@@ -203,7 +230,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return "", err
 	}
@@ -215,9 +242,11 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("[LLM] Request failed: %v", err)
 		return "", err
 	}
 	defer resp.Body.Close()
+	log.Printf("[LLM] Received response status: %s", resp.Status)
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -225,24 +254,20 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 	}
 
 	if isStreaming {
-		reader := bufio.NewReader(resp.Body)
+		scanner := bufio.NewScanner(resp.Body)
 		fullContent := ""
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return "", err
-			}
+		log.Printf("[LLM] Starting SSE stream scanner...")
+		for scanner.Scan() {
+			line := scanner.Text()
+			log.Printf("[LLM] RAW LINE: %s", line)
 
-			line = strings.TrimSpace(line)
 			if line == "" || !strings.HasPrefix(line, "data: ") {
 				continue
 			}
 
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
+				log.Printf("[LLM] Stream received [DONE]")
 				break
 			}
 
@@ -250,28 +275,31 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 				Choices []struct {
 					Delta struct {
 						Content          string `json:"content"`
-						ReasoningContent string `json:"reasoning_content"` // For O1/R1/Qwen thinking
+						ReasoningContent string `json:"reasoning_content"`
 					} `json:"delta"`
 				} `json:"choices"`
 			}
-
+			
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				continue // Skip invalid chunks
+				log.Printf("[LLM] JSON Parse Error: %v | Data: %s", err, data)
+				continue
 			}
 
 			if len(chunk.Choices) > 0 {
-				content := chunk.Choices[0].Delta.Content
-				reasoning := chunk.Choices[0].Delta.ReasoningContent
-				
-				if reasoning != "" {
-					runtime.EventsEmit(a.ctx, "llm:thinking", reasoning)
+				delta := chunk.Choices[0].Delta
+				if delta.ReasoningContent != "" {
+					runtime.EventsEmit(a.ctx, "llm:thinking", delta.ReasoningContent)
 				}
-				if content != "" {
-					fullContent += content
-					runtime.EventsEmit(a.ctx, "llm:chunk", content)
+				if delta.Content != "" {
+					fullContent += delta.Content
+					runtime.EventsEmit(a.ctx, "llm:chunk", delta.Content)
 				}
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("[LLM] Scanner error: %v", err)
+		}
+		log.Printf("[LLM] Stream complete. Total length: %d", len(fullContent))
 		return fullContent, nil
 	}
 

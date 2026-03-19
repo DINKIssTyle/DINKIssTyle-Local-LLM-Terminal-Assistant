@@ -3,18 +3,156 @@
     Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 */
 
-import {useState, useEffect, useRef} from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './App.css';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, StopTerminal, SetActiveTab, UpdateMCPSettings } from "../wailsjs/go/main/App";
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
 import { EventsOn, EventsEmit } from "../wailsjs/runtime/runtime";
+
+function escapeHtml(text: string): string {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function renderInlineMarkdown(text: string): string {
+    let html = escapeHtml(text);
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    return html;
+}
+
+function renderTextBlock(block: string): string {
+    const lines = block.split('\n').map(line => line.trimEnd()).filter(Boolean);
+    if (lines.length === 0) return '';
+
+    if (lines.every(line => /^\d+\.\s+/.test(line))) {
+        return `<ol>${lines.map(line => `<li>${renderInlineMarkdown(line.replace(/^\d+\.\s+/, ''))}</li>`).join('')}</ol>`;
+    }
+
+    if (lines.every(line => /^[-*]\s+/.test(line))) {
+        return `<ul>${lines.map(line => `<li>${renderInlineMarkdown(line.replace(/^[-*]\s+/, ''))}</li>`).join('')}</ul>`;
+    }
+
+    return `<p>${lines.map(renderInlineMarkdown).join('<br>')}</p>`;
+}
+
+function stripMarkupForContext(text: string): string {
+    return text
+        .replace(/<analysis>([\s\S]*?)<\/analysis>/gi, '$1')
+        .replace(/<progress[^>]*>([\s\S]*?)<\/progress>/gi, '$1')
+        .replace(/<artifact[^>]*>([\s\S]*?)<\/artifact>/gi, '$1')
+        .replace(/```[\s\S]*?```/g, '[code block]')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+        .replace(/[*_`>#-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function renderMarkdown(text: string): string {
+    if (!text) return '';
+
+    const placeholders: string[] = [];
+    const stash = (value: string) => {
+        const token = `@@BLOCK_${placeholders.length}@@`;
+        placeholders.push(value);
+        return token;
+    };
+
+    let html = text.replace(/\r\n/g, '\n').trim();
+
+    html = html.replace(/<analysis>([\s\S]*?)<\/analysis>/gi, (_, content) => {
+        return stash(`<div class="message-block analysis-block"><span class="analysis-icon">Inspect</span><strong>${renderInlineMarkdown(content.trim())}</strong></div>`);
+    });
+
+    html = html.replace(/<progress title="([^"]*)" description="([^"]*)">([\s\S]*?)<\/progress>/gi, (_, title, desc, content) => {
+        const items = content
+            .split('\n')
+            .map((line: string) => line.trim())
+            .filter(Boolean)
+            .map((line: string, index: number) => {
+                const match = line.match(/^(\d+)\.\s*(.*)/);
+                const step = match ? match[2] : line;
+                const num = match ? match[1] : String(index + 1);
+                return `<div class="progress-item"><span class="progress-num">${num}</span><span>${renderInlineMarkdown(step)}</span></div>`;
+            })
+            .join('');
+
+        return stash(`<section class="message-block progress-block">
+            <div class="progress-header"><span>${renderInlineMarkdown(title)}</span><span class="progress-meta">Progress</span></div>
+            <div class="progress-description">${renderInlineMarkdown(desc)}</div>
+            <div class="progress-list">${items}</div>
+        </section>`);
+    });
+
+    html = html.replace(/<progress>([\s\S]*?)<\/progress>/gi, (_, content) => {
+        const items = content
+            .split('\n')
+            .map((line: string) => line.trim())
+            .filter(Boolean)
+            .map((line: string, index: number) => {
+                const cleaned = line.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '');
+                return `<div class="progress-item"><span class="progress-num">${index + 1}</span><span>${renderInlineMarkdown(cleaned)}</span></div>`;
+            })
+            .join('');
+
+        return stash(`<section class="message-block progress-block">
+            <div class="progress-header"><span>Working Step</span><span class="progress-meta">Progress</span></div>
+            <div class="progress-list">${items}</div>
+        </section>`);
+    });
+
+    html = html.replace(/<artifact title="([^"]*)" description="([^"]*)" type="([^"]*)">([^<]*)<\/artifact>/gi, (_, title, desc, type, path) => {
+        return stash(`<section class="artifact-card">
+            <div class="artifact-header">
+                <div class="artifact-title">${renderInlineMarkdown(title)}</div>
+                <button class="open-btn" onclick="window.dispatchEvent(new CustomEvent('open-artifact', {detail: '${escapeHtml(path.trim())}'}))">Open</button>
+            </div>
+            <div class="artifact-type">${renderInlineMarkdown(type)}</div>
+            <div class="artifact-desc">${renderInlineMarkdown(desc)}</div>
+        </section>`);
+    });
+
+    html = html.replace(/>>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</g, (_, command) => {
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>Run In Terminal</span>
+                <span class="progress-meta">Action</span>
+            </div>
+            <div class="command-body"><code>${escapeHtml(command.trim())}</code></div>
+        </section>`);
+    });
+
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, language, code) => {
+        return stash(`<pre><code class="language-${escapeHtml(language || 'plain')}">${escapeHtml(code.trim())}</code></pre>`);
+    });
+
+    html = html
+        .split(/\n{2,}/)
+        .map(block => renderTextBlock(block))
+        .filter(Boolean)
+        .join('');
+
+    placeholders.forEach((block, index) => {
+        html = html.replace(`@@BLOCK_${index}@@`, block);
+    });
+
+    return html;
+}
 
 interface Message {
     role: 'user' | 'assistant' | 'system' | 'tool';
     content: string;
     name?: string;
+    reasoning?: string;
 }
 
 interface Tab {
@@ -22,15 +160,42 @@ interface Tab {
     name: string;
 }
 
+const ASSISTANT_DISPLAY_NAME = 'Assistant';
+
+const ReasoningBox = ({ content, isThinking }: { content: string, isThinking: boolean }) => {
+    const [isCollapsed, setIsCollapsed] = useState(!isThinking);
+
+    useEffect(() => {
+        if (isThinking) setIsCollapsed(false);
+    }, [isThinking]);
+
+    if (!content && !isThinking) return null;
+
+    return (
+        <div className={`reasoning-status ${isCollapsed ? 'collapsed' : ''}`} style={{ background: '#111', border: 'none' }}>
+            <div className="reasoning-header" onClick={() => setIsCollapsed(!isCollapsed)} style={{ color: '#888', textTransform: 'none', border: 'none' }}>
+                <span style={{ fontSize: '10px' }}>{isCollapsed ? '▶' : '▼'}</span>
+                <span>{isThinking ? 'Thinking...' : 'Thought for 3s'}</span>
+            </div>
+            {!isCollapsed && (
+                <div className="reasoning-body" style={{ color: '#eee', background: '#000' }}>
+                    {content}
+                    {isThinking && <span className="typing-cursor">|</span>}
+                </div>
+            )}
+        </div>
+    );
+};
+
 function App() {
     const terminalContainersRef = useRef<{ [id: string]: HTMLDivElement | null }>({});
     const xtermsRef = useRef<{ [id: string]: Terminal | null }>({});
     const fitAddonsRef = useRef<{ [id: string]: FitAddon | null }>({});
-    
+
     const [tabs, setTabs] = useState<Tab[]>([{ id: '1', name: 'Tab 1' }]);
     const [activeTabId, setActiveTabId] = useState('1');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    
+
     // Settings with persistence
     const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'http://localhost:1234/v1');
     const [apiKey, setApiKey] = useState(() => localStorage.getItem('apiKey') || '');
@@ -48,7 +213,11 @@ function App() {
 
     // Assistant Settings with persistence
     const [chatFontSize, setChatFontSize] = useState(() => Number(localStorage.getItem('chatFontSize')) || 14);
-    const [chatFontFamily, setChatFontFamily] = useState(() => localStorage.getItem('chatFontFamily') || 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif');
+    const [chatFontFamily, setChatFontFamily] = useState(() => {
+        const saved = localStorage.getItem('chatFontFamily');
+        if (!saved || saved.includes("Inter")) return 'system-ui, -apple-system, sans-serif';
+        return saved;
+    });
     const [chatWidth, setChatWidth] = useState(() => Number(localStorage.getItem('chatWidth')) || 450);
     const [mcpPort, setMcpPort] = useState(() => Number(localStorage.getItem('mcpPort')) || 8080);
     const [mcpLabel, setMcpLabel] = useState(() => localStorage.getItem('mcpLabel') || 'dinkisstyle-gateway');
@@ -56,8 +225,13 @@ function App() {
 
     // MCP Settings with persistence
     const [enabledTools, setEnabledTools] = useState<string[]>(() => {
-        const saved = localStorage.getItem('enabledTools');
-        return saved ? JSON.parse(saved) : ['search_web', 'read_web_page', 'get_current_time', 'execute_command'];
+        try {
+            const saved = localStorage.getItem('enabledTools');
+            return saved ? JSON.parse(saved) : ['search_web', 'read_web_page', 'get_current_time', 'execute_command'];
+        } catch (e) {
+            console.error("Error parsing enabledTools", e);
+            return ['search_web', 'read_web_page', 'get_current_time', 'execute_command'];
+        }
     });
 
     useEffect(() => {
@@ -80,6 +254,28 @@ function App() {
         localStorage.setItem('enabledTools', JSON.stringify(enabledTools));
     }, [apiUrl, apiKey, modelName, maxTokens, temperature, provider, isStreaming, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, enabledTools]);
 
+    const testLLMConnection = async () => {
+        let url = apiUrl.trim();
+        if (!url.startsWith('http')) url = 'http://' + url;
+        url = url.replace(/\/+$/, '');
+
+        try {
+            console.log(`[LLM] Testing connection to ${url}/models`);
+            const response = await fetch(`${url}/models`, {
+                method: 'GET',
+                signal: AbortSignal.timeout(5000)
+            });
+            if (response.ok) {
+                const data = await response.json();
+                alert(`✅ Connection Successful!\nFound ${data.data?.length || 0} models.`);
+            } else {
+                alert(`❌ Connection Failed: ${response.status} ${response.statusText}`);
+            }
+        } catch (e: any) {
+            alert(`❌ Connection Error: ${e.message || e}\nCheck if the URL is correct and the server is running.`);
+        }
+    };
+
     const handleSaveSettings = () => {
         UpdateMCPSettings(mcpPort, mcpLabel);
         setIsSettingsOpen(false);
@@ -91,12 +287,22 @@ function App() {
 
     const [availableTools, setAvailableTools] = useState<any[]>([]);
     const [messages, setMessages] = useState<Message[]>([
-        { role: 'assistant', content: '안녕하세요! DKST Terminal Assistant입니다. 무엇을 도와드릴까요?' }
+        {
+            role: 'assistant',
+            content: `<analysis>System Initialization</analysis>
+<progress title="Welcome to DKST Terminal Assistant" description="I am ready to assist you with terminal tasks and coding.">
+1. Terminal connected to active tab
+2. MCP tools loaded and ready
+3. Markdown renderer initialized
+</progress>
+안녕하세요! **DKST Terminal Assistant**입니다. 무엇을 도와드릴까요?`
+        }
     ]);
     const [inputText, setInputText] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const [currentThinking, setCurrentThinking] = useState('');
+    const [isThinking, setIsThinking] = useState(false);
 
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
@@ -112,9 +318,13 @@ function App() {
         };
         window.addEventListener('mousemove', handleMouseMove);
         window.addEventListener('mouseup', handleMouseUp);
+        window.addEventListener('open-artifact', (e: any) => {
+            alert("Opening artifact: " + e.detail);
+        });
         return () => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
+            window.removeEventListener('open-artifact', (e: any) => { });
         };
     }, []);
 
@@ -133,6 +343,7 @@ function App() {
 
         const unoffThinking = EventsOn("llm:thinking", (chunk: string) => {
             setCurrentThinking(prev => prev + chunk);
+            setIsThinking(true);
         });
 
         return () => {
@@ -233,9 +444,49 @@ function App() {
         if (activeTabId === id) setActiveTabId(newTabs[newTabs.length - 1].id);
     };
 
+    const getVisibleTerminalText = (): string => {
+        const term = xtermsRef.current[activeTabId] as any;
+        if (!term?.buffer?.active) return 'Terminal text unavailable.';
+
+        const buffer = term.buffer.active;
+        const preferredStart = typeof buffer.viewportY === 'number'
+            ? buffer.viewportY
+            : Math.max(0, buffer.baseY - term.rows);
+        const start = Math.max(0, preferredStart);
+        const end = Math.min(buffer.length - 1, start + Math.max(term.rows - 1, 0));
+        const lines: string[] = [];
+
+        for (let i = start; i <= end; i += 1) {
+            const line = buffer.getLine(i);
+            if (!line) continue;
+            const text = line.translateToString(true).trimEnd();
+            if (text) lines.push(text);
+        }
+
+        return lines.join('\n') || 'Terminal viewport is currently empty.';
+    };
+
+    const buildScreenContext = (history: Message[]): string => {
+        const activeTab = tabs.find(tab => tab.id === activeTabId);
+        const visibleChat = history.slice(-6).map(message => {
+            const roleLabel = message.role === 'user' ? 'User' : message.role === 'assistant' ? 'Assistant' : message.role;
+            return `${roleLabel}: ${stripMarkupForContext(message.content).slice(0, 500) || '(empty)'}`;
+        }).join('\n');
+
+        return [
+            `ACTIVE_TAB: ${activeTab?.name || activeTabId}`,
+            `CHAT_WIDTH: ${chatWidth}px`,
+            'VISIBLE_TERMINAL:',
+            getVisibleTerminalText(),
+            'VISIBLE_CHAT:',
+            visibleChat || 'No visible chat messages.',
+        ].join('\n');
+    };
+
     const sendMessage = async () => {
         if (!inputText.trim() || isLoading) return;
 
+        console.log("Sending message...", inputText);
         const userMessage: Message = { role: 'user', content: inputText };
         const newMessages = [...messages, userMessage];
         setMessages(newMessages);
@@ -245,12 +496,20 @@ function App() {
 
         try {
             const activeTools = availableTools.filter(t => enabledTools.includes(t.name));
-            const systemPrompt = `You are a helpful terminal assistant named ${mcpLabel}. 
-You have access to the following tools: ${JSON.stringify(activeTools)}.
-To use a tool, you MUST respond with the following EXACT format:
-[TOOL: tool_name {"arg1": "value"}]
+            console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} tools enabled.`);
+            console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
 
-Wait for the tool result before continuing your response.
+            const baseSystemPrompt = `You are ${mcpLabel}, a professional AI engineer. 
+1. UI: Use <analysis>, <progress>, and <artifact> blocks when they add value. Keep answers compact and readable in a narrow side chat.
+2. SCREEN AWARENESS: You receive SCREEN_CONTEXT describing what is visible in the app right now. When the user asks about "this", "above", "on screen", terminal output, or chat content, use SCREEN_CONTEXT first. If the context is insufficient, say exactly what is missing.
+3. TOOLS: To run a terminal command, YOU MUST output this EXACT line:
+   >>> EXECUTE_COMMAND: "YOUR_COMMAND" <<<
+   
+Example: To check the home folder, output:
+>>> EXECUTE_COMMAND: "cd ~ && ls" <<<
+
+ALWAYS use the tool when the user asks for terminal actions.
+4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.
 Current OS: ${window.navigator.platform}`;
 
             const historyToSend = newMessages.filter((msg, idx) => {
@@ -258,35 +517,70 @@ Current OS: ${window.navigator.platform}`;
                 return true;
             });
 
-            let currentMessages: any[] = [{ role: 'system', content: systemPrompt }, ...historyToSend];
-            let response = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, isStreaming, currentMessages);
-            
-            // Robust regex to handle multi-line JSON (using [\s\S] for dotAll behavior)
-            const toolRegex = /\[TOOL:\s*(\w+)\s*([\s\S]*?)\]/;
-            
+            const buildLLMMessages = (history: Message[]) => {
+                const screenContext = buildScreenContext(history);
+                return [{
+                    role: 'system',
+                    content: `${baseSystemPrompt}\n\nSCREEN_CONTEXT:\n${screenContext}`
+                }, ...history];
+            };
+
+            let currentMessages: any[] = buildLLMMessages(historyToSend);
+            console.log("[LLM] Sending Payload:", JSON.stringify(currentMessages, null, 2));
+            let response = '';
+            setCurrentThinking('');
+            setIsThinking(true);
+
+            // Initialize assistant message for streaming
+            setMessages(prev => [...prev, { role: 'assistant', content: '', reasoning: '' }]);
+
+            try {
+                // Call StopLLMResponse safely
+                if ((window as any).go?.main?.App?.StopLLMResponse) {
+                    await (window as any).go.main.App.StopLLMResponse();
+                }
+
+                response = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, isStreaming, currentMessages);
+            } catch (err) {
+                throw err;
+            } finally {
+                setIsThinking(false);
+            }
+
+            // Ultra-simple regex for local LLMs: >>> EXECUTE_COMMAND: "cmd" <<<
+            const toolRegex = />>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
+
             while (true) {
                 const match = response.match(toolRegex);
                 if (match) {
-                    const toolName = match[1];
-                    const toolArgs = match[2].trim() || '{}';
-                    
+                    const toolName = "execute_command";
+                    const toolArgs = JSON.stringify({ command: match[1] });
+                    const commandText = match[1];
+
                     // Filter out the tool call from the response to prevent loops and show only final text
                     response = response.replace(match[0], '').trim();
-                    
+
                     setMessages(prev => [...prev, { role: 'system', content: `🔧 Executing ${toolName}...` }]);
-                    
+
                     try {
                         const result = await CallTool(toolName, toolArgs);
-                        
+                        console.log(`[MCP] Tool ${toolName} result:`, result);
+
                         // Map role: 'tool' to 'user' for local LLMs for better compatibility
                         const toolRole: 'tool' | 'user' = (provider === 'OpenAI') ? 'tool' : 'user';
                         const toolContent = (toolRole === 'user') ? `[Tool Response from ${toolName}]: ${result}` : result;
-                        
                         const toolResultMsg: Message = { role: toolRole, content: toolContent, name: toolName };
-                        
-                        currentMessages.push({ role: 'assistant', content: `[TOOL: ${toolName} ${toolArgs}]` });
-                        currentMessages.push(toolResultMsg);
-                        
+                        const toolResultForUi: Message = {
+                            role: 'tool',
+                            name: toolName,
+                            content: `Command: \`${commandText}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
+                        };
+
+                        historyToSend.push({ role: 'assistant', content: `[TOOL: ${toolName} ${toolArgs}]` });
+                        historyToSend.push(toolResultMsg);
+                        setMessages(prev => [...prev, toolResultForUi]);
+                        currentMessages = buildLLMMessages(historyToSend);
+
                         // Get next response after tool execution
                         response = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, isStreaming, currentMessages);
                     } catch (err) {
@@ -298,19 +592,49 @@ Current OS: ${window.navigator.platform}`;
                 }
             }
 
-            setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
-            await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, isStreaming, currentMessages);
-        } catch (error) {
-            setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${error}` }]);
+            if (!response && !currentThinking) {
+                response = "죄송합니다. 응답을 생성하지 못했습니다. 설정을 확인하거나 다시 시도해 주세요.";
+            }
+
+            setMessages(prev => {
+                const updated = [...prev];
+                const last = updated[updated.length - 1];
+                if (last && last.role === 'assistant') {
+                    last.content = response;
+                    last.reasoning = currentThinking;
+                }
+                return updated;
+            });
+        } catch (error: any) {
+            console.error("[LLM] Error in sendMessage:", error);
+            setMessages(prev => [...prev, { role: 'system', content: `❌ LLM Request Failed: ${error.message || error}` }]);
         } finally {
             setIsLoading(false);
-            setCurrentThinking('');
+            setIsThinking(false);
         }
     };
 
-    const clearMessages = () => {
-        setMessages([{ role: 'assistant', content: '대화 기록이 초기화되었습니다.' }]);
+    const handleStop = async () => {
+        await StopLLMResponse();
+        setIsLoading(false);
+        setIsThinking(false);
     };
+
+    const clearMessages = () => {
+        setMessages([{
+            role: 'assistant',
+            content: `<analysis>System Lifecycle: Reset Success</analysis>
+<progress title="DKST Terminal Assistant: New Session" description="System is ready for your next request.">
+1. Conversation history cleared
+2. Memory buffer released
+</progress>
+대화 기록이 초기화되었습니다. 무엇을 도와드릴까요?`
+        }]);
+    };
+
+    useEffect(() => {
+        console.log("DKST Terminal Assistant: Component Mounted");
+    }, []);
 
     return (
         <div id="App" className="app-container">
@@ -354,39 +678,53 @@ Current OS: ${window.navigator.platform}`;
                         <div className="message-list">
                             {messages.map((m, i) => (
                                 <div key={i} className={`message ${m.role}`}>
-                                    {m.role === 'assistant' && i === messages.length - 1 && currentThinking && (
-                                        <div className="thinking-block">
-                                            <div className="thinking-header">Thinking...</div>
-                                            <div className="thinking-content">{currentThinking}</div>
-                                        </div>
+                                    <div className="message-label">
+                                        {m.role === 'user' ? 'YOU' : m.role === 'tool' ? 'TOOL' : m.role === 'system' ? 'SYSTEM' : ASSISTANT_DISPLAY_NAME.toUpperCase()}
+                                    </div>
+                                    {m.role === 'assistant' && (
+                                        <>
+                                            {/* Historical reasoning */}
+                                            {m.reasoning && !isLoading && (
+                                                <ReasoningBox content={m.reasoning} isThinking={false} />
+                                            )}
+                                            {/* Active reasoning for the last message */}
+                                            {i === messages.length - 1 && isLoading && (currentThinking || isThinking) && (
+                                                <ReasoningBox content={currentThinking} isThinking={isThinking} />
+                                            )}
+                                        </>
                                     )}
-                                    <div className="bubble">{m.content}</div>
+                                    <div className="bubble">
+                                        <div dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }} />
+                                    </div>
                                 </div>
                             ))}
-                            {isLoading && (!messages[messages.length - 1] || (!messages[messages.length - 1].content && !currentThinking)) && (
-                                <div className="message assistant loading"><div className="bubble">Thinking...</div></div>
-                            )}
                             <div ref={chatEndRef} />
                         </div>
                     </div>
                     <div className="chat-input-area">
-                        <textarea 
-                            className="chat-input" 
-                            placeholder="메시지를 입력하세요..." 
-                            value={inputText} 
-                            onChange={e => setInputText(e.target.value)} 
-                            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-                        ></textarea>
-                        <button className="send-btn" onClick={sendMessage} disabled={isLoading}>{isLoading ? '...' : '전송'}</button>
+                        <div className="input-wrapper">
+                            <textarea
+                                className="chat-input"
+                                placeholder="메시지를 입력하세요..."
+                                value={inputText}
+                                onChange={e => setInputText(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+                            ></textarea>
+                            {isLoading ? (
+                                <button className="stop-btn" onClick={handleStop}>정지</button>
+                            ) : (
+                                <button className="send-btn" onClick={sendMessage}>전송</button>
+                            )}
+                        </div>
                     </div>
                 </div>
 
                 {isSettingsOpen && (
                     <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
                         <div className="settings-modal" onClick={e => e.stopPropagation()}>
+                            <button className="close-icon-btn" onClick={() => setIsSettingsOpen(false)}>×</button>
                             <div className="settings-header">
                                 <h3>Configuration</h3>
-                                <button className="close-icon-btn" onClick={() => setIsSettingsOpen(false)}>×</button>
                             </div>
                             <div className="settings-tabs-content">
                                 <div className="settings-section">
@@ -394,7 +732,10 @@ Current OS: ${window.navigator.platform}`;
                                     <div className="settings-grid">
                                         <div className="settings-field full">
                                             <label>Server URL</label>
-                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://127.0.0.1:1234/v1" />
+                                            <div style={{ display: 'flex', gap: '8px' }}>
+                                                <input style={{ flex: 1 }} type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://127.0.0.1:1234/v1" />
+                                                <button onClick={testLLMConnection} style={{ padding: '0 12px', fontSize: '12px' }}>Test</button>
+                                            </div>
                                         </div>
                                         <div className="settings-field full">
                                             <label>API Key (Optional)</label>
@@ -457,7 +798,9 @@ Current OS: ${window.navigator.platform}`;
                                     </div>
                                 </div>
                             </div>
-                            <div className="settings-footer"><button className="save-btn" onClick={handleSaveSettings}>Apply & Save</button></div>
+                            <div className="settings-footer">
+                                <button className="save-btn" onClick={handleSaveSettings}>Apply & Save</button>
+                            </div>
                         </div>
                     </div>
                 )}

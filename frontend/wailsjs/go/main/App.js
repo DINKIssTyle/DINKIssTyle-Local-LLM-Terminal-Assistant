@@ -30,6 +30,10 @@ export function StartTerminal(arg1) {
   return window['go']['main']['App']['StartTerminal'](arg1);
 }
 
+export function StopLLMResponse() {
+  return window['go']['main']['App']['StopLLMResponse']();
+}
+
 export function StopTerminal(arg1) {
   return window['go']['main']['App']['StopTerminal'](arg1);
 }
