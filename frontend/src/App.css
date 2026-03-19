@@ -454,6 +454,53 @@ select {
     color: #d7deea;
 }
 
+.llm-progress-card {
+    width: min(100%, 38rem);
+    padding: 4px 2px 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.llm-progress-text {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    color: #94a3bb;
+}
+
+.llm-progress-label {
+    font-weight: 500;
+    letter-spacing: 0.01em;
+}
+
+.llm-progress-percent {
+    color: #b7c4da;
+    font-variant-numeric: tabular-nums;
+}
+
+.llm-progress-track {
+    width: 100%;
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.llm-progress-fill {
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #5f6fff, #7ea6ff);
+    box-shadow: 0 0 10px rgba(95, 111, 255, 0.2);
+    transition: width 0.2s ease;
+}
+
+.llm-progress-card.prompt-processing .llm-progress-fill {
+    background: linear-gradient(90deg, #7b72ff, #8f97ff);
+}
+
 .message-block,
 .artifact-card {
     width: min(100%, 100%);

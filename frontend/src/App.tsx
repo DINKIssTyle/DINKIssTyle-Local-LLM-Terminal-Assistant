@@ -343,6 +343,14 @@ type ParsedToolCall = {
     toolArgs: string;
 };
 
+type LLMProgressState = {
+    phase: 'model-load' | 'prompt-processing';
+    label: string;
+    percent: number;
+    active: boolean;
+    simulated?: boolean;
+};
+
 const parseSendKeysPayload = (payload: string): string[] | null => {
     try {
         const parsed = JSON.parse(payload);
@@ -420,6 +428,22 @@ const isAppNewTabShortcut = (keys: string[]): boolean => {
     const normalized = normalizeShortcutTokens(keys);
     const hasModifier = normalized.includes('CTRL') || normalized.includes('CONTROL') || normalized.includes('CMD') || normalized.includes('COMMAND') || normalized.includes('META');
     return hasModifier && normalized.includes('SHIFT') && normalized.includes('T');
+};
+
+const LLMProgressCard = ({ progress }: { progress: LLMProgressState | null }) => {
+    if (!progress?.active) return null;
+
+    return (
+        <div className={`llm-progress-card ${progress.phase}`}>
+            <div className="llm-progress-text">
+                <span className="llm-progress-label">{progress.label}</span>
+                <span className="llm-progress-percent">{Math.max(0, Math.min(100, Math.round(progress.percent)))}%</span>
+            </div>
+            <div className="llm-progress-track">
+                <div className="llm-progress-fill" style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }}></div>
+            </div>
+        </div>
+    );
 };
 
 const getAppTabSwitchIndex = (keys: string[]): number | null => {
@@ -590,6 +614,7 @@ function App() {
     const chatEndRef = useRef<HTMLDivElement>(null);
     const [currentThinking, setCurrentThinking] = useState('');
     const [isThinking, setIsThinking] = useState(false);
+    const [llmProgress, setLlmProgress] = useState<LLMProgressState | null>(null);
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [isFetchingModels, setIsFetchingModels] = useState(false);
 
@@ -714,11 +739,59 @@ function App() {
             setIsThinking(true);
         });
 
+        const unoffProgress = EventsOn("llm:status", (payload: any) => {
+            if (!payload?.active) {
+                setLlmProgress(null);
+                return;
+            }
+
+            const phase = payload.phase === 'model-load' ? 'model-load' : 'prompt-processing';
+            setLlmProgress({
+                phase,
+                label: payload.label || (phase === 'model-load' ? 'Loading Model...' : 'Processing Prompt...'),
+                percent: Number(payload.percent || 0),
+                active: true,
+            });
+        });
+
         return () => {
             unoffChunk();
             unoffThinking();
+            unoffProgress();
         };
     }, []);
+
+    useEffect(() => {
+        if (!(isLoading && provider === 'LM Studio')) {
+            setLlmProgress(null);
+            return;
+        }
+
+        const start = Date.now();
+        const interval = window.setInterval(() => {
+            setLlmProgress(prev => {
+                if (prev && !prev.simulated) {
+                    return prev;
+                }
+
+                const elapsed = Date.now() - start;
+                const phase = elapsed < 1400 ? 'model-load' : 'prompt-processing';
+                const percent = phase === 'model-load'
+                    ? Math.min(38, 8 + elapsed / 45)
+                    : Math.min(92, 42 + (elapsed - 1400) / 55);
+
+                return {
+                    phase,
+                    label: phase === 'model-load' ? 'Loading Model...' : 'Processing Prompt...',
+                    percent,
+                    active: true,
+                    simulated: true,
+                };
+            });
+        }, 140);
+
+        return () => window.clearInterval(interval);
+    }, [isLoading, provider]);
 
     const scrollToBottom = () => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -1445,6 +1518,9 @@ Current OS: ${window.navigator.platform}`;
                                             {/* Active reasoning for the last message */}
                                             {i === messages.length - 1 && isLoading && (currentThinking || isThinking) && (
                                                 <ReasoningBox content={currentThinking} isThinking={isThinking} />
+                                            )}
+                                            {i === messages.length - 1 && isLoading && provider === 'LM Studio' && (
+                                                <LLMProgressCard progress={llmProgress} />
                                             )}
                                         </>
                                     )}

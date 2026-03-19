@@ -190,6 +190,33 @@ func normalizeAPIBaseURL(raw string) string {
 	return strings.TrimSuffix(normalized, "/")
 }
 
+func emitLLMProgress(ctx context.Context, phase string, label string, percent int, active bool) {
+	runtime.EventsEmit(ctx, "llm:status", map[string]interface{}{
+		"phase":   phase,
+		"label":   label,
+		"percent": percent,
+		"active":  active,
+	})
+}
+
+func readProgressPercent(eventData map[string]interface{}) int {
+	raw, ok := eventData["progress"]
+	if !ok {
+		return 0
+	}
+
+	switch value := raw.(type) {
+	case float64:
+		return int(value * 100)
+	case float32:
+		return int(value * 100)
+	case int:
+		return value
+	default:
+		return 0
+	}
+}
+
 func terminalCommandSuffix() string {
 	return "\r"
 }
@@ -514,19 +541,77 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 	if isStreaming {
 		scanner := bufio.NewScanner(resp.Body)
 		fullContent := ""
+		currentEventType := ""
 		log.Printf("[LLM] Starting SSE stream scanner...")
 		for scanner.Scan() {
 			line := scanner.Text()
 			log.Printf("[LLM] RAW LINE: %s", line)
 
-			if line == "" || !strings.HasPrefix(line, "data: ") {
+			if line == "" {
+				continue
+			}
+
+			if strings.HasPrefix(line, "event: ") {
+				currentEventType = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+				continue
+			}
+
+			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
 
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
 				log.Printf("[LLM] Stream received [DONE]")
+				emitLLMProgress(a.ctx, "", "", 100, false)
 				break
+			}
+
+			if currentEventType != "" {
+				var eventData map[string]interface{}
+				if err := json.Unmarshal([]byte(data), &eventData); err == nil {
+					switch currentEventType {
+					case "model_load.start":
+						emitLLMProgress(a.ctx, "model-load", "Loading Model...", 0, true)
+						currentEventType = ""
+						continue
+					case "model_load.progress":
+						pct := readProgressPercent(eventData)
+						emitLLMProgress(a.ctx, "model-load", fmt.Sprintf("Loading Model... %d%%", pct), pct, true)
+						currentEventType = ""
+						continue
+					case "model_load.end":
+						emitLLMProgress(a.ctx, "model-load", "Model Loaded", 100, true)
+						currentEventType = ""
+						continue
+					case "prompt_processing.start":
+						emitLLMProgress(a.ctx, "prompt-processing", "Processing Prompt...", 0, true)
+						currentEventType = ""
+						continue
+					case "prompt_processing.progress":
+						pct := readProgressPercent(eventData)
+						emitLLMProgress(a.ctx, "prompt-processing", fmt.Sprintf("Processing Prompt... %d%%", pct), pct, true)
+						currentEventType = ""
+						continue
+					case "prompt_processing.end":
+						emitLLMProgress(a.ctx, "prompt-processing", "Prompt Processed", 100, true)
+						currentEventType = ""
+						continue
+					case "message.delta":
+						if content, ok := eventData["content"].(string); ok && content != "" {
+							fullContent += content
+							runtime.EventsEmit(a.ctx, "llm:chunk", content)
+							currentEventType = ""
+							continue
+						}
+					case "reasoning.delta":
+						if reasoning, ok := eventData["content"].(string); ok && reasoning != "" {
+							runtime.EventsEmit(a.ctx, "llm:thinking", reasoning)
+							currentEventType = ""
+							continue
+						}
+					}
+				}
 			}
 
 			var chunk struct {
@@ -553,11 +638,13 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 					runtime.EventsEmit(a.ctx, "llm:chunk", delta.Content)
 				}
 			}
+			currentEventType = ""
 		}
 		if err := scanner.Err(); err != nil {
 			log.Printf("[LLM] Scanner error: %v", err)
 		}
 		log.Printf("[LLM] Stream complete. Total length: %d", len(fullContent))
+		emitLLMProgress(a.ctx, "", "", 100, false)
 		return fullContent, nil
 	}
 
