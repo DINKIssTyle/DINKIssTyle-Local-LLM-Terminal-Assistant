@@ -405,6 +405,12 @@ function App() {
     };
 
     useEffect(() => {
+        UpdateMCPSettings(mcpPort, mcpLabel).catch((error) => {
+            console.error('[MCP] Failed to apply persisted MCP settings on startup:', error);
+        });
+    }, []);
+
+    useEffect(() => {
         SetActiveTab(activeTabId);
     }, [activeTabId]);
 
