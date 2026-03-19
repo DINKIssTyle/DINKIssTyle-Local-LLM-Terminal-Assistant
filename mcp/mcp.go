@@ -15,6 +15,7 @@ import (
 // It should return the output and any error.
 var TerminalExecutor func(command string) (string, error)
 var TerminalKeyExecutor func(keys []string) (string, error)
+var TerminalTailReader func(lines int, maxWaitMs int, idleMs int) (string, error)
 
 type Tool struct {
 	Name        string      `json:"name"`
@@ -83,6 +84,18 @@ func GetToolList() []Tool {
 					},
 				},
 				"required": []string{"keys"},
+			},
+		},
+		{
+			Name:        "read_terminal_tail",
+			Description: "Read the latest output from the active terminal. Use this after long-running commands like builds or tests to inspect whether they succeeded or failed.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"lines": map[string]interface{}{"type": "integer", "description": "How many recent lines to return. Defaults to 40."},
+					"maxWaitMs": map[string]interface{}{"type": "integer", "description": "How long to wait for terminal output to go idle before reading. Defaults to 0."},
+					"idleMs": map[string]interface{}{"type": "integer", "description": "How long output must stay quiet to count as idle. Defaults to 1200."},
+				},
 			},
 		},
 		{
@@ -161,6 +174,20 @@ func ExecuteToolByName(toolName string, argumentsJSON string) (string, error) {
 			return "", fmt.Errorf("terminal key executor not configured")
 		}
 		return TerminalKeyExecutor(args.Keys)
+
+	case "read_terminal_tail":
+		var args struct {
+			Lines     int `json:"lines"`
+			MaxWaitMs int `json:"maxWaitMs"`
+			IdleMs    int `json:"idleMs"`
+		}
+		if err := json.Unmarshal([]byte(argumentsJSON), &args); err != nil {
+			return "", fmt.Errorf("invalid arguments: %v", err)
+		}
+		if TerminalTailReader == nil {
+			return "", fmt.Errorf("terminal tail reader not configured")
+		}
+		return TerminalTailReader(args.Lines, args.MaxWaitMs, args.IdleMs)
 
 	case "naver_search":
 		var args struct {

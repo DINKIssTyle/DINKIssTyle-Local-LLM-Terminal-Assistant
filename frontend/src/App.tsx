@@ -432,6 +432,29 @@ const getAppTabSwitchIndex = (keys: string[]): number | null => {
     return digit === '0' ? 9 : Number(digit) - 1;
 };
 
+const shouldInspectTerminalAfterCommand = (command: string): boolean => {
+    return command.trim().length > 0;
+};
+
+const detectWindowsCmdSyntax = (command: string): string | null => {
+    const normalized = command.trim().toLowerCase();
+    if (!normalized) return null;
+
+    const patterns: Array<{ pattern: RegExp; message: string }> = [
+        { pattern: /\bif\s+exist\b/, message: '`if exist`는 cmd.exe 문법입니다. PowerShell에서는 `if (Test-Path ...) { ... }`를 사용해야 합니다.' },
+        { pattern: /\bdir\b(?:\s|$)/, message: '`dir` 대신 PowerShell cmdlet이나 `Get-ChildItem`을 사용하세요.' },
+        { pattern: /\bcopy\b(?:\s|$)/, message: '`copy` 대신 `Copy-Item`을 사용하세요.' },
+        { pattern: /\bdel\b(?:\s|$)/, message: '`del` 대신 `Remove-Item`을 사용하세요.' },
+        { pattern: /\btype\b(?:\s|$)/, message: '`type` 대신 `Get-Content`를 사용하세요.' },
+        { pattern: /\bset\s+[a-z_][a-z0-9_]*=/, message: '`set VAR=value`는 cmd.exe 문법입니다. PowerShell에서는 `$env:VAR = "value"`를 사용하세요.' },
+        { pattern: /%[a-z0-9_]+%/i, message: '`%VAR%` 환경변수 문법은 cmd.exe 방식입니다. PowerShell에서는 `$env:VAR`를 사용하세요.' },
+        { pattern: /\b&&\b|\b\|\|\b/, message: '`&&` 또는 `||` 대신 PowerShell의 `;`, `if`, `-and`, `-or` 등을 사용하세요.' },
+    ];
+
+    const match = patterns.find(({ pattern }) => pattern.test(normalized));
+    return match ? match.message : null;
+};
+
 const ReasoningBox = ({ content, isThinking }: { content: string, isThinking: boolean }) => {
     const [isCollapsed, setIsCollapsed] = useState(!isThinking);
 
@@ -935,6 +958,72 @@ function App() {
         return nextResponse;
     };
 
+    const getLatestUserRequest = (history: Message[]): string => {
+        for (let index = history.length - 1; index >= 0; index -= 1) {
+            const message = history[index];
+            if (message.role === 'user' && message.content?.trim()) {
+                return message.content.trim();
+            }
+        }
+        return '';
+    };
+
+    const summarizeTerminalTail = async (
+        userRequest: string,
+        commandText: string,
+        terminalTail: string,
+        historyToSend: Message[],
+        baseSystemPrompt: string,
+    ) => {
+        const analysisPrompt = `${baseSystemPrompt}
+5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal command that was run for that request, and the terminal output that appeared after it. Answer the user's request directly using the terminal result, not by merely describing the command. If the request asks for a fact like CPU, version, file name, or status, state that fact plainly in the first sentence.
+6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and mention the supporting evidence briefly. If it failed, start with "작업이 실패했습니다." and explain why. If the result is still inconclusive, start with "작업이 아직 진행 중이거나 완료 여부가 불분명합니다." and explain what is missing. If terminal output alone is inconclusive, use SCREEN_CONTEXT to check whether the prompt returned or the visible app state suggests completion. Do not emit tool calls in this follow-up summary.`;
+
+        const terminalContext: Message[] = [
+            ...historyToSend,
+            {
+                role: 'user',
+                content: `[Latest user request]\n${userRequest || '(missing)'}\n\n[Executed command]\n${commandText}\n\n[Terminal output after the command]\n${terminalTail}`,
+            },
+        ];
+
+        const llmMessages = buildLLMMessages(terminalContext, analysisPrompt);
+        return FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
+    };
+
+    const shouldContinueAfterToolExecution = (toolName: string) => {
+        return toolName !== 'execute_command' && toolName !== 'send_keys';
+    };
+
+    const buildTerminalToolSummary = (toolName: 'execute_command' | 'send_keys', commandText: string, responseSansCommand: string) => {
+        if (responseSansCommand) {
+            return responseSansCommand;
+        }
+
+        if (toolName === 'execute_command') {
+            return `\`${commandText}\` 명령을 터미널로 보냈습니다. 결과는 왼쪽 터미널에서 확인하세요.`;
+        }
+
+        return '터미널에 키 입력을 전송했습니다.';
+    };
+
+    const inspectTerminalIfNeeded = async (
+        toolName: 'execute_command' | 'send_keys',
+        commandText: string,
+        historyToSend: Message[],
+        baseSystemPrompt: string,
+        responseSansCommand: string,
+    ) => {
+        if (toolName !== 'execute_command' || !shouldInspectTerminalAfterCommand(commandText)) {
+            return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
+        }
+
+        const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 4000, idleMs: 1200 });
+        const tail = await CallTool('read_terminal_tail', tailArgs);
+
+        return summarizeTerminalTail(getLatestUserRequest(historyToSend), commandText, tail, [...historyToSend], baseSystemPrompt);
+    };
+
     const ensureAssistantPlaceholder = () => {
         setMessages(prev => {
             const last = prev[prev.length - 1];
@@ -1001,20 +1090,34 @@ function App() {
             setMessages(prev => [...prev, {
                 role: 'tool',
                 name: request.toolName,
-                content: `Command: \`${request.command}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
+                content: `Command: \`${request.command}\`\n\nStatus: ${result}`
             }]);
 
-            ensureAssistantPlaceholder();
-            setIsThinking(true);
-            const response = await continueAfterToolExecution(
-                request.toolName,
-                request.toolArgs,
-                result,
-                [...request.historyToSend],
-                request.baseSystemPrompt,
-                request.responseSansCommand,
-            );
-            setIsThinking(false);
+            let response = buildTerminalToolSummary('execute_command', request.command, request.responseSansCommand);
+            if (shouldContinueAfterToolExecution(request.toolName)) {
+                ensureAssistantPlaceholder();
+                setIsThinking(true);
+                response = await continueAfterToolExecution(
+                    request.toolName,
+                    request.toolArgs,
+                    result,
+                    [...request.historyToSend],
+                    request.baseSystemPrompt,
+                    request.responseSansCommand,
+                );
+                setIsThinking(false);
+            } else {
+                ensureAssistantPlaceholder();
+                setIsThinking(true);
+                response = await inspectTerminalIfNeeded(
+                    request.toolName,
+                    request.command,
+                    [...request.historyToSend],
+                    request.baseSystemPrompt,
+                    request.responseSansCommand,
+                );
+                setIsThinking(false);
+            }
 
             setMessages(prev => {
                 const updated = [...prev];
@@ -1065,6 +1168,7 @@ Example: To exit vim without saving, output:
 
 ALWAYS use the tool when the user asks for terminal actions.
 If the user asks to count files, inspect directories, verify paths, read files, or confirm system state, use terminal commands even if something similar is visible in SCREEN_CONTEXT.
+When Current OS indicates Windows, assume the terminal shell is PowerShell. Use PowerShell syntax only. Do not use cmd.exe or batch syntax such as \`if exist\`, \`dir /b\`, \`copy\`, \`del\`, \`type\`, \`set VAR=\`, or \`%VAR%\`.
 4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.
 Current OS: ${window.navigator.platform}`;
 
@@ -1101,9 +1205,22 @@ Current OS: ${window.navigator.platform}`;
                 if (parsedToolCall) {
                     const { raw, toolName, commandText, parsedKeys, toolArgs } = parsedToolCall;
                     const commandPolicy = classifyCommand(commandText);
+                    const windowsCmdSyntaxError = toolName === 'execute_command' && window.navigator.platform.toLowerCase().includes('win')
+                        ? detectWindowsCmdSyntax(commandText)
+                        : null;
 
                     // Filter out the tool call from the response to prevent loops and show only final text
                     response = response.replace(raw, '').trim();
+
+                    if (windowsCmdSyntaxError) {
+                        commandIntercepted = true;
+                        setMessages(prev => [...prev, {
+                            role: 'system',
+                            content: `${response ? `${response}\n\n` : ''}Windows에서는 PowerShell 문법만 사용해야 합니다. ${windowsCmdSyntaxError}`,
+                        }]);
+                        response = '';
+                        break;
+                    }
 
                     if (toolName === 'execute_command' && commandPolicy.status === 'blocked') {
                         commandIntercepted = true;
@@ -1153,21 +1270,36 @@ Current OS: ${window.navigator.platform}`;
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
-                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${commandText}\`\n\nResult:\n\`\`\`\n${result}\n\`\`\``
+                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${commandText}\`\n\nStatus: ${result}`
                         };
                         setMessages(prev => [...prev, toolResultForUi]);
-                        ensureAssistantPlaceholder();
-                        setCurrentThinking('');
-                        setIsThinking(true);
-                        response = await continueAfterToolExecution(
-                            toolName,
-                            toolArgs,
-                            result,
-                            historyToSend,
-                            baseSystemPrompt,
-                            response,
-                        );
-                        setIsThinking(false);
+                        if (shouldContinueAfterToolExecution(toolName)) {
+                            ensureAssistantPlaceholder();
+                            setCurrentThinking('');
+                            setIsThinking(true);
+                            response = await continueAfterToolExecution(
+                                toolName,
+                                toolArgs,
+                                result,
+                                historyToSend,
+                                baseSystemPrompt,
+                                response,
+                            );
+                            setIsThinking(false);
+                        } else {
+                            ensureAssistantPlaceholder();
+                            setCurrentThinking('');
+                            setIsThinking(true);
+                            response = await inspectTerminalIfNeeded(
+                                toolName,
+                                commandText,
+                                [...historyToSend],
+                                baseSystemPrompt,
+                                response,
+                            );
+                            setIsThinking(false);
+                            break;
+                        }
                     } catch (err) {
                         response = `Error calling tool ${toolName}: ${err}`;
                         break;

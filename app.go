@@ -14,8 +14,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"dkst-terminal-assistant/mcp"
 	"dkst-terminal-assistant/terminal"
 
@@ -145,22 +147,68 @@ func encodeTerminalKeys(keys []string) (string, error) {
 	return builder.String(), nil
 }
 
+func trimMatchingQuotes(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) < 2 {
+		return trimmed
+	}
+
+	if (trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'') || (trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"') {
+		return trimmed[1 : len(trimmed)-1]
+	}
+
+	return trimmed
+}
+
+func unwrapWindowsPowerShellCommand(command string) string {
+	trimmed := strings.TrimSpace(command)
+	lower := strings.ToLower(trimmed)
+	prefixes := []string{
+		"powershell -command",
+		"powershell.exe -command",
+		"pwsh -command",
+		"pwsh.exe -command",
+	}
+
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return trimMatchingQuotes(trimmed[len(prefix):])
+		}
+	}
+
+	return trimmed
+}
+
+func terminalCommandSuffix() string {
+	return "\r"
+}
+
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+func stripANSIEscapeCodes(value string) string {
+	cleaned := ansiEscapePattern.ReplaceAllString(value, "")
+	cleaned = strings.ReplaceAll(cleaned, "\x1b]0;", "")
+	return strings.TrimSpace(cleaned)
+}
+
 // App struct
 type App struct {
-	ctx         context.Context
-	terminals   map[string]*terminal.Terminal
-	activeTabId string
-	mcpPort     int
-	mcpLabel    string
-	mcpServer   *MCPServer
-	mu          sync.Mutex
-	cancelFunc  context.CancelFunc
+	ctx                context.Context
+	terminals          map[string]*terminal.Terminal
+	activeTabId        string
+	mcpPort            int
+	mcpLabel           string
+	mcpServer          *MCPServer
+	lastCommandCursor  map[string]int
+	mu                 sync.Mutex
+	cancelFunc         context.CancelFunc
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{
-		terminals: make(map[string]*terminal.Terminal),
+		terminals:         make(map[string]*terminal.Terminal),
+		lastCommandCursor: make(map[string]int),
 	}
 }
 
@@ -178,15 +226,25 @@ func (a *App) startup(ctx context.Context) {
 			return "", fmt.Errorf("no active terminal tab")
 		}
 
-		// Write to terminal and wait a bit for output or just return success
-		// Real interactive output is hard to capture synchronously, 
-		// but since it's a real terminal, the user will see it.
-		// We'll return a message that it's running in the terminal.
-		err := a.WriteToTerminal(activeId, command+"\n")
-		if err != nil {
+		normalized := strings.TrimSpace(command)
+		if normalized == "" {
+			return "", fmt.Errorf("command cannot be empty")
+		}
+
+		normalized = unwrapWindowsPowerShellCommand(normalized)
+
+		a.mu.Lock()
+		term := a.terminals[activeId]
+		if term != nil {
+			a.lastCommandCursor[activeId] = term.OutputCursor()
+		}
+		a.mu.Unlock()
+
+		if err := a.WriteToTerminal(activeId, normalized+terminalCommandSuffix()); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Command '%s' sent to active terminal (Tab ID: %s)", command, activeId), nil
+
+		return fmt.Sprintf("Sent to terminal: %s", normalized), nil
 	}
 	mcp.TerminalKeyExecutor = func(keys []string) (string, error) {
 		if isAppNewTabShortcut(keys) {
@@ -216,6 +274,9 @@ func (a *App) startup(ctx context.Context) {
 		}
 
 		return fmt.Sprintf("Keys %v sent to active terminal (Tab ID: %s)", keys, activeId), nil
+	}
+	mcp.TerminalTailReader = func(lines int, maxWaitMs int, idleMs int) (string, error) {
+		return a.ReadActiveTerminalTail(lines, maxWaitMs, idleMs)
 	}
 }
 
@@ -276,6 +337,7 @@ func (a *App) StopTerminal(id string) error {
 
 	term.Stop()
 	delete(a.terminals, id)
+	delete(a.lastCommandCursor, id)
 	return nil
 }
 
@@ -284,6 +346,43 @@ func (a *App) SetActiveTab(id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.activeTabId = id
+}
+
+func (a *App) ReadActiveTerminalTail(lines int, maxWaitMs int, idleMs int) (string, error) {
+	a.mu.Lock()
+	activeId := a.activeTabId
+	term, exists := a.terminals[activeId]
+	cursor := a.lastCommandCursor[activeId]
+	a.mu.Unlock()
+
+	if activeId == "" || !exists {
+		return "", fmt.Errorf("no active terminal tab")
+	}
+
+	if idleMs <= 0 {
+		idleMs = 1200
+	}
+	if maxWaitMs < 0 {
+		maxWaitMs = 0
+	}
+
+	deadline := time.Now().Add(time.Duration(maxWaitMs) * time.Millisecond)
+	for maxWaitMs > 0 {
+		if term.TimeSinceLastOutput() >= time.Duration(idleMs)*time.Millisecond {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	tail := stripANSIEscapeCodes(term.TailLinesSince(lines, cursor))
+	if tail == "" {
+		return "(no recent terminal output)", nil
+	}
+
+	return tail, nil
 }
 
 // UpdateMCPSettings updates the internal MCP server configuration
