@@ -546,6 +546,27 @@ select {
     flex-direction: column;
 }
 
+.tasklist-block {
+    display: flex;
+    flex-direction: column;
+    border-color: rgba(88, 166, 255, 0.22);
+    box-shadow: inset 0 1px 0 rgba(88, 166, 255, 0.06);
+}
+
+.walkthrough-block {
+    display: flex;
+    flex-direction: column;
+    border-color: rgba(91, 179, 134, 0.22);
+    box-shadow: inset 0 1px 0 rgba(91, 179, 134, 0.05);
+}
+
+.report-block {
+    display: flex;
+    flex-direction: column;
+    border-color: rgba(255, 196, 92, 0.22);
+    box-shadow: inset 0 1px 0 rgba(255, 196, 92, 0.05);
+}
+
 .command-block {
     display: flex;
     flex-direction: column;
@@ -574,6 +595,21 @@ select {
     font-weight: 800;
     color: #b9d7ff;
     line-height: 1.25;
+}
+
+.tasklist-block .progress-header {
+    color: #c7e0ff;
+    background: linear-gradient(180deg, rgba(88, 166, 255, 0.1), rgba(88, 166, 255, 0.03));
+}
+
+.walkthrough-block .progress-header {
+    color: #caf3d9;
+    background: linear-gradient(180deg, rgba(91, 179, 134, 0.1), rgba(91, 179, 134, 0.03));
+}
+
+.report-block .progress-header {
+    color: #ffe6aa;
+    background: linear-gradient(180deg, rgba(255, 196, 92, 0.1), rgba(255, 196, 92, 0.03));
 }
 
 .progress-meta,

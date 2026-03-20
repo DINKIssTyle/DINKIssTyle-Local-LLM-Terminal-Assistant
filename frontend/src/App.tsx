@@ -80,6 +80,9 @@ function stripMarkupForContext(text: string): string {
     return text
         .replace(/<analysis>([\s\S]*?)<\/analysis>/gi, '$1')
         .replace(/<progress[^>]*>([\s\S]*?)<\/progress>/gi, '$1')
+        .replace(/<tasklist[^>]*>([\s\S]*?)<\/tasklist>/gi, '$1')
+        .replace(/<walkthrough[^>]*>([\s\S]*?)<\/walkthrough>/gi, '$1')
+        .replace(/<report[^>]*>([\s\S]*?)<\/report>/gi, '$1')
         .replace(/<artifact[^>]*>([\s\S]*?)<\/artifact>/gi, '$1')
         .replace(/```[\s\S]*?```/g, '[code block]')
         .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
@@ -96,6 +99,26 @@ function isMeaningfulProgressLine(line: string): boolean {
     return true;
 }
 
+function extractStructuredListItems(content: string): Array<{ num: string; text: string }> {
+    return content
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(isMeaningfulProgressLine)
+        .map((line, index) => {
+            const orderedMatch = line.match(/^(\d+)\.\s*(.*)$/);
+            if (orderedMatch) {
+                return { num: orderedMatch[1], text: orderedMatch[2] };
+            }
+
+            const bulletMatch = line.match(/^[-*]\s*(.*)$/);
+            return {
+                num: String(index + 1),
+                text: bulletMatch ? bulletMatch[1] : line,
+            };
+        })
+        .filter(item => item.text.trim().length > 0);
+}
+
 function humanizeArtifactLabel(value: string): string {
     const normalized = value.trim().replace(/[_-]+/g, ' ');
     if (!normalized) return 'Artifact';
@@ -104,6 +127,12 @@ function humanizeArtifactLabel(value: string): string {
         .split(/\s+/)
         .map(token => token.length <= 3 ? token.toUpperCase() : token.charAt(0).toUpperCase() + token.slice(1))
         .join(' ');
+}
+
+function renderStructuredItems(items: Array<{ num: string; text: string }>): string {
+    return items
+        .map(item => `<div class="progress-item"><span class="progress-num">${escapeHtml(item.num)}</span><span>${renderInlineMarkdown(item.text)}</span></div>`)
+        .join('');
 }
 
 function renderMarkdown(text: string): string {
@@ -143,18 +172,49 @@ function renderMarkdown(text: string): string {
     });
 
     html = html.replace(/<progress>([\s\S]*?)<\/progress>/gi, (_, content) => {
-        const items = content
-            .split('\n')
-            .map((line: string) => line.trim())
-            .filter(isMeaningfulProgressLine)
-            .map((line: string, index: number) => {
-                const cleaned = line.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '');
-                return `<div class="progress-item"><span class="progress-num">${index + 1}</span><span>${renderInlineMarkdown(cleaned)}</span></div>`;
-            })
-            .join('');
+        const items = renderStructuredItems(extractStructuredListItems(content));
 
         return stash(`<section class="message-block progress-block">
             <div class="progress-header"><span>Working Step</span><span class="progress-meta">Progress</span></div>
+            <div class="progress-list">${items}</div>
+        </section>`);
+    });
+
+    html = html.replace(/<tasklist title="([^"]*)" description="([^"]*)">([\s\S]*?)<\/tasklist>/gi, (_, title, desc, content) => {
+        const items = renderStructuredItems(extractStructuredListItems(content));
+
+        return stash(`<section class="message-block tasklist-block">
+            <div class="progress-header">
+                <span>${renderInlineMarkdown(title)}</span>
+                <span class="progress-meta">Tasks</span>
+            </div>
+            <div class="progress-description">${renderInlineMarkdown(desc)}</div>
+            <div class="progress-list">${items}</div>
+        </section>`);
+    });
+
+    html = html.replace(/<walkthrough title="([^"]*)" description="([^"]*)">([\s\S]*?)<\/walkthrough>/gi, (_, title, desc, content) => {
+        const items = renderStructuredItems(extractStructuredListItems(content));
+
+        return stash(`<section class="message-block walkthrough-block">
+            <div class="progress-header">
+                <span>${renderInlineMarkdown(title)}</span>
+                <span class="progress-meta">Walkthrough</span>
+            </div>
+            <div class="progress-description">${renderInlineMarkdown(desc)}</div>
+            <div class="progress-list">${items}</div>
+        </section>`);
+    });
+
+    html = html.replace(/<report title="([^"]*)" description="([^"]*)">([\s\S]*?)<\/report>/gi, (_, title, desc, content) => {
+        const items = renderStructuredItems(extractStructuredListItems(content));
+
+        return stash(`<section class="message-block report-block">
+            <div class="progress-header">
+                <span>${renderInlineMarkdown(title)}</span>
+                <span class="progress-meta">Report</span>
+            </div>
+            <div class="progress-description">${renderInlineMarkdown(desc)}</div>
             <div class="progress-list">${items}</div>
         </section>`);
     });
@@ -502,6 +562,64 @@ const getAppTabSwitchIndex = (keys: string[]): number | null => {
 
 const shouldInspectTerminalAfterCommand = (command: string): boolean => {
     return command.trim().length > 0;
+};
+
+const COMPLEX_REQUEST_KEYWORDS = [
+    'complex',
+    '복잡',
+    '단계',
+    'multi-step',
+    'workflow',
+    'plan',
+    'task',
+    '태스크',
+    '워크스루',
+    'walkthrough',
+    '구현',
+    '설계',
+    '리팩터',
+    'refactor',
+    'investigate',
+    '분석',
+    '검토',
+    'end-to-end',
+    '보고',
+];
+
+const isComplexRequest = (request: string): boolean => {
+    const normalized = request.trim().toLowerCase();
+    if (!normalized) return false;
+
+    const keywordHits = COMPLEX_REQUEST_KEYWORDS.filter(keyword => normalized.includes(keyword)).length;
+    const sentenceCount = normalized.split(/[.!?\n]/).map(token => token.trim()).filter(Boolean).length;
+    const conjunctionHits = (normalized.match(/\b(and|then|after|before|with|plus)\b/g) || []).length
+        + (normalized.match(/그리고|다음|이후|전에|및|해서|해서도|하면서/g) || []).length;
+
+    return normalized.length >= 140 || keywordHits >= 2 || sentenceCount >= 3 || conjunctionHits >= 2;
+};
+
+const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
+    if (!complexRequest) return '';
+
+    return `
+5. COMPLEX TASK MODE: If the user's request is multi-step, implementation-heavy, review-heavy, or explicitly asks for a workflow, you MUST structure your response and execution like an agent runbook.
+6. COMPLEX TASK FORMAT: For the first substantial assistant response, include these blocks in order when they add value:
+   <analysis>Short diagnosis of the request and constraints</analysis>
+   <tasklist title="Execution Plan" description="What will be handled end-to-end">
+   1. Define or confirm the task breakdown
+   2. Execute the tasks in order
+   3. Verify outcomes
+   </tasklist>
+   After meaningful work is completed, include:
+   <walkthrough title="What I Did" description="Concrete execution trace">
+   1. ...
+   2. ...
+   </walkthrough>
+   <report title="Completion Report" description="Outcome, verification, and remaining risk">
+   1. ...
+   2. ...
+   </report>
+7. COMPLEX TASK BEHAVIOR: Do not only propose a plan. Actually carry out the work, keep the task list aligned with the work performed, and finish with a completion report.`;
 };
 
 const detectWindowsCmdSyntax = (command: string): string | null => {
@@ -1079,12 +1197,7 @@ function App() {
         baseSystemPrompt: string,
         responseSansCommand: string,
     ) => {
-        const toolRole: 'tool' | 'user' = (provider === 'OpenAI') ? 'tool' : 'user';
-        const toolContent = (toolRole === 'user') ? `[Tool Response from ${toolName}]: ${result}` : result;
-        const toolResultMsg: Message = { role: toolRole, content: toolContent, name: toolName };
-
-        historyToSend.push({ role: 'assistant', content: `[TOOL: ${toolName} ${toolArgs}]` });
-        historyToSend.push(toolResultMsg);
+        appendToolResultToHistory(historyToSend, toolName, toolArgs, result);
 
         let nextResponse = '';
         if (responseSansCommand) {
@@ -1094,6 +1207,20 @@ function App() {
         const llmMessages = buildLLMMessages(historyToSend, baseSystemPrompt);
         nextResponse = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
         return nextResponse;
+    };
+
+    const appendToolResultToHistory = (
+        history: Message[],
+        toolName: string,
+        toolArgs: string,
+        result: string,
+    ) => {
+        const toolRole: 'tool' | 'user' = (provider === 'OpenAI') ? 'tool' : 'user';
+        const toolContent = (toolRole === 'user') ? `[Tool Response from ${toolName}]: ${result}` : result;
+        const toolResultMsg: Message = { role: toolRole, content: toolContent, name: toolName };
+
+        history.push({ role: 'assistant', content: `[TOOL: ${toolName} ${toolArgs}]` });
+        history.push(toolResultMsg);
     };
 
     const getLatestUserRequest = (history: Message[]): string => {
@@ -1115,7 +1242,8 @@ function App() {
     ) => {
         const analysisPrompt = `${baseSystemPrompt}
 5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal command that was run for that request, and the terminal output that appeared after it. Answer the user's request directly using the terminal result, not by merely describing the command. If the request asks for a fact like CPU, version, file name, or status, state that fact plainly in the first sentence.
-6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and mention the supporting evidence briefly. If it failed, start with "작업이 실패했습니다." and explain why. If the result is still inconclusive, start with "작업이 아직 진행 중이거나 완료 여부가 불분명합니다." and explain what is missing. If terminal output alone is inconclusive, use SCREEN_CONTEXT to check whether the prompt returned or the visible app state suggests completion. Do not emit tool calls in this follow-up summary.`;
+6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and mention the supporting evidence briefly. If it failed, start with "작업이 실패했습니다." and explain why. If the result is still inconclusive, start with "작업이 아직 진행 중이거나 완료 여부가 불분명합니다." and explain what is missing. If terminal output alone is inconclusive, use SCREEN_CONTEXT to check whether the prompt returned or the visible app state suggests completion. Do not emit tool calls in this follow-up summary.
+7. If COMPLEX TASK MODE applies, preserve the same runbook style and end with a <report> block instead of a plain summary when possible.`;
 
         const terminalContext: Message[] = [
             ...historyToSend,
@@ -1294,6 +1422,7 @@ function App() {
             const activeTools = availableTools.filter(t => enabledTools.includes(t.name));
             console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} tools enabled.`);
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
+            const complexRequest = isComplexRequest(inputText);
 
             const baseSystemPrompt = `You are ${mcpLabel}, a professional AI engineer. 
 1. UI: Use <analysis>, <progress>, and <artifact> blocks when they add value. Keep answers compact and readable in a narrow side chat.
@@ -1318,15 +1447,17 @@ ALWAYS use the tool when the user asks for terminal actions.
 If the user asks for latest web information, website verification, or online reading, use search_web and read_web_page instead of saying web browsing is unavailable.
 If the user asks to count files, inspect directories, verify paths, read files, or confirm system state, use terminal commands even if something similar is visible in SCREEN_CONTEXT.
 When Current OS indicates Windows, assume the terminal shell is PowerShell. Use PowerShell syntax only. Do not use cmd.exe or batch syntax such as \`if exist\`, \`dir /b\`, \`copy\`, \`del\`, \`type\`, \`set VAR=\`, or \`%VAR%\`.
-4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.
-Current OS: ${window.navigator.platform}`;
+4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.${buildTaskWorkflowPrompt(complexRequest)}
+Current OS: ${window.navigator.platform}
+Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
 
             const historyToSend = newMessages.filter((msg, idx) => {
                 if (idx === 0 && msg.role === 'assistant') return false;
                 return true;
             });
+            const loopHistory = [...historyToSend];
 
-            let currentMessages: any[] = buildLLMMessages(historyToSend, baseSystemPrompt);
+            let currentMessages: any[] = buildLLMMessages(loopHistory, baseSystemPrompt);
             console.log("[LLM] Sending Payload:", JSON.stringify(currentMessages, null, 2));
             let response = '';
             let commandIntercepted = false;
@@ -1349,7 +1480,14 @@ Current OS: ${window.navigator.platform}`;
                 setIsThinking(false);
             }
 
+            let toolLoopCount = 0;
             while (true) {
+                toolLoopCount += 1;
+                if (toolLoopCount > 8) {
+                    response = `${response ? `${response}\n\n` : ''}작업이 여러 단계로 계속 이어지고 있어 여기서 중단했습니다. 다음 단계가 더 필요하면 이어서 진행하겠습니다.`;
+                    break;
+                }
+
                 const parsedToolCall = parseToolCallFromResponse(response);
                 if (parsedToolCall) {
                     const { raw, toolName, commandText, parsedKeys, toolArgs } = parsedToolCall;
@@ -1392,7 +1530,7 @@ Current OS: ${window.navigator.platform}`;
                             command: commandText,
                             toolName,
                             toolArgs,
-                            historyToSend: [...historyToSend],
+                            historyToSend: [...loopHistory],
                             baseSystemPrompt,
                             responseSansCommand: response,
                         });
@@ -1430,24 +1568,24 @@ Current OS: ${window.navigator.platform}`;
                                 toolName,
                                 toolArgs,
                                 result,
-                                historyToSend,
+                                loopHistory,
                                 baseSystemPrompt,
                                 response,
                             );
                             setIsThinking(false);
                         } else {
+                            appendToolResultToHistory(loopHistory, toolName, toolArgs, result);
                             ensureAssistantPlaceholder();
                             setCurrentThinking('');
                             setIsThinking(true);
                             response = await inspectTerminalIfNeeded(
                                 toolName,
                                 commandText,
-                                [...historyToSend],
+                                loopHistory,
                                 baseSystemPrompt,
                                 response,
                             );
                             setIsThinking(false);
-                            break;
                         }
                     } catch (err) {
                         response = `Error calling tool ${toolName}: ${err}`;
