@@ -1883,6 +1883,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                 </div>
                             </div>
                             <div className="settings-footer">
+                                <div className="settings-footer-copy">(C) 2026 DINKI&apos;ssTyle</div>
                                 <button className="save-btn" onClick={handleSaveSettings}>Apply & Save</button>
                             </div>
                         </div>
