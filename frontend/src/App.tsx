@@ -9,6 +9,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './App.css';
 import mcpDocsContent from './assets/docs/mcp.md?raw';
+import { getTranslation, Language } from './i18n/translations';
 import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
 import { EventsOn, EventsEmit } from "../wailsjs/runtime/runtime";
 
@@ -678,6 +679,7 @@ function App() {
     const [isMcpDocsOpen, setIsMcpDocsOpen] = useState(false);
 
     // Settings with persistence
+    const [language, setLanguage] = useState<Language>(() => (localStorage.getItem('language') as Language) || 'ko');
     const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'localhost:1234');
     const [apiKey, setApiKey] = useState(() => localStorage.getItem('apiKey') || '');
     const [modelName, setModelName] = useState(() => localStorage.getItem('modelName') || 'qwen/qwen3.5-35b-a3b');
@@ -724,6 +726,7 @@ function App() {
     };
 
     useEffect(() => {
+        localStorage.setItem('language', language);
         localStorage.setItem('apiUrl', apiUrl);
         localStorage.setItem('apiKey', apiKey);
         localStorage.setItem('modelName', modelName);
@@ -742,7 +745,7 @@ function App() {
         localStorage.setItem('blockedCommandPatterns', blockedCommandPatterns);
         localStorage.setItem('approvalCommandPatterns', approvalCommandPatterns);
         localStorage.setItem('enabledTools', JSON.stringify(enabledTools));
-    }, [apiUrl, apiKey, modelName, maxTokens, temperature, provider, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools]);
+    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, provider, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools]);
 
     const handleSaveSettings = () => {
         UpdateMCPSettings(mcpPort, mcpLabel);
@@ -767,16 +770,19 @@ function App() {
     }, [activeTabId]);
 
     const [availableTools, setAvailableTools] = useState<any[]>([]);
+    
+    const t = (key: Parameters<typeof getTranslation>[1]) => getTranslation(language, key);
+
     const [messages, setMessages] = useState<Message[]>([
         {
             role: 'assistant',
             content: `<analysis>System Initialization</analysis>
-<progress title="Welcome to DKST Terminal Assistant" description="I am ready to assist you with terminal tasks and coding.">
+<progress title="${t('greetingTitle')}" description="${t('greetingDesc')}">
 1. Terminal connected to active tab
 2. MCP tools loaded and ready
 3. Markdown renderer initialized
 </progress>
-안녕하세요! **DKST Terminal Assistant**입니다. 무엇을 도와드릴까요?`
+${t('greeting')}`
         }
     ]);
     const [inputText, setInputText] = useState('');
@@ -1737,7 +1743,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                         <div className="input-wrapper" style={{ fontSize: `${chatFontSize}px`, fontFamily: chatFontFamily }}>
                             <textarea
                                 className="chat-input"
-                                placeholder="메시지를 입력하세요..."
+                                placeholder={t('chatPlaceholder')}
                                 value={inputText}
                                 onChange={e => setInputText(e.target.value)}
                                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
@@ -1766,19 +1772,28 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                         <div className="settings-modal" onClick={e => e.stopPropagation()}>
                             <button className="close-icon-btn" onClick={() => setIsSettingsOpen(false)}>×</button>
                             <div className="settings-header">
-                                <h3>Configuration</h3>
+                                <h3>{t('settings')}</h3>
                             </div>
                             <div className="settings-tabs-content">
                                 <div className="settings-section">
-                                    <h4>LLM Configuration</h4>
+                                    <h4>{t('llmConfig')}</h4>
                                     <div className="settings-grid">
                                         <div className="settings-field">
-                                            <label>Server URL</label>
-                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="127.0.0.1:1234" {...textAssistOffProps} />
-                                            <span className="settings-hint">주소:포트 만 입력하세요 예: localhost:1234</span>
+                                            <label>{t('language')}</label>
+                                            <select value={language} onChange={e => setLanguage(e.target.value as Language)}>
+                                                <option value="ko">한국어</option>
+                                                <option value="en">English</option>
+                                                <option value="ja">日本語</option>
+                                                <option value="zh">中文</option>
+                                            </select>
                                         </div>
                                         <div className="settings-field">
-                                            <label>Model Key</label>
+                                            <label>{t('serverUrl')}</label>
+                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="127.0.0.1:1234" {...textAssistOffProps} />
+                                            <span className="settings-hint">{t('urlHint')}</span>
+                                        </div>
+                                        <div className="settings-field">
+                                            <label>{t('modelKey')}</label>
                                             <div className="model-selection-group">
                                                 {provider === 'LM Studio' && availableModels.length > 0 ? (
                                                     <select
@@ -1798,52 +1813,52 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                                         className="refresh-models-btn"
                                                         onClick={handleFetchModels}
                                                         disabled={isFetchingModels}
-                                                        title="사용 가능한 모델 목록 가져오기"
+                                                        title={t('fetchModels')}
                                                     >
-                                                        {isFetchingModels ? '...' : 'Fetch'}
+                                                        {isFetchingModels ? '...' : t('fetchModels')}
                                                     </button>
                                                 )}
                                             </div>
-                                            <span className="settings-hint">권장모델: qwen/qwen3.5-35b-a3b, qwen/qwen3.5-9b, nvidia/nemotron-3-nano</span>
+                                            <span className="settings-hint">{t('modelHint')}</span>
                                         </div>
                                         <div className="settings-field">
-                                            <label>LLM Provider</label>
+                                            <label>{t('llmProvider')}</label>
                                             <select value={provider} onChange={e => setProvider(e.target.value)}>
                                                 <option>LM Studio</option><option>OpenAI</option><option>Ollama</option><option>Custom</option>
                                             </select>
-                                            <span className="settings-hint">이 앱은 LM Studio에 최적화 되어있으며, 모든 기능은 LM Studio 모드에서 활성화됩니다.</span>
+                                            <span className="settings-hint">{t('providerHint')}</span>
                                         </div>
                                         <div className="settings-field">
-                                            <label>API Key (필수)</label>
+                                            <label>{provider === 'LM Studio' || provider === 'Ollama' ? t('apiKey') : t('apiKeyRequired')}</label>
                                             <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="OpenAI or Local key" {...textAssistOffProps} />
                                         </div>
                                         <div className="settings-field">
-                                            <label>Max Tokens</label>
+                                            <label>{t('maxTokens')}</label>
                                             <input type="number" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} />
-                                            <span className="settings-hint">값이 높을수록 처리 역량이 상승합니다.</span>
+                                            <span className="settings-hint">{t('tokensHint')}</span>
                                         </div>
-                                        <div className="settings-field"><label>Temperature</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>
+                                        <div className="settings-field"><label>{t('temperature')}</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>
                                     </div>
                                 </div>
                                 <div className="settings-section">
-                                    <h4>Assistant Appearance</h4>
+                                    <h4>{t('appearance')}</h4>
                                     <div className="settings-grid">
-                                        <div className="settings-field"><label>FontSize</label><input type="number" min="10" max="28" value={chatFontSize} onChange={e => setChatFontSize(clampChatFontSize(Number(e.target.value)))} /></div>
-                                        <div className="settings-field"><label>FontFamily</label><input type="text" value={chatFontFamily} onChange={e => setChatFontFamily(e.target.value)} {...textAssistOffProps} /></div>
+                                        <div className="settings-field"><label>{t('chatFontSize')}</label><input type="number" min="10" max="28" value={chatFontSize} onChange={e => setChatFontSize(clampChatFontSize(Number(e.target.value)))} /></div>
+                                        <div className="settings-field"><label>{t('chatFontFamily')}</label><input type="text" value={chatFontFamily} onChange={e => setChatFontFamily(e.target.value)} {...textAssistOffProps} /></div>
                                     </div>
                                 </div>
                                 <div className="settings-section">
-                                    <h4>Terminal Appearance</h4>
+                                    <h4>Terminal {t('appearance')}</h4>
                                     <div className="settings-grid">
-                                        <div className="settings-field"><label>FontSize</label><input type="number" min="10" max="24" value={termFontSize} onChange={e => setTermFontSize(clampTerminalFontSize(Number(e.target.value)))} /></div>
-                                        <div className="settings-field"><label>FontFamily</label><input type="text" value={termFontFamily} onChange={e => setTermFontFamily(e.target.value)} {...textAssistOffProps} /></div>
-                                        <div className="settings-field"><label>Foreground</label><input type="color" value={termForeground} onChange={e => setTermForeground(e.target.value)} /></div>
-                                        <div className="settings-field"><label>Background</label><input type="color" value={termBackground} onChange={e => setTermBackground(e.target.value)} /></div>
+                                        <div className="settings-field"><label>{t('termFontSize')}</label><input type="number" min="10" max="24" value={termFontSize} onChange={e => setTermFontSize(clampTerminalFontSize(Number(e.target.value)))} /></div>
+                                        <div className="settings-field"><label>{t('termFontFamily')}</label><input type="text" value={termFontFamily} onChange={e => setTermFontFamily(e.target.value)} {...textAssistOffProps} /></div>
+                                        <div className="settings-field"><label>{t('termForeground')}</label><input type="color" value={termForeground} onChange={e => setTermForeground(e.target.value)} /></div>
+                                        <div className="settings-field"><label>{t('termBackground')}</label><input type="color" value={termBackground} onChange={e => setTermBackground(e.target.value)} /></div>
                                     </div>
                                 </div>
                                 <div className="settings-section">
                                     <div className="settings-section-title">
-                                        <h4>MCP Gateway Configuration</h4>
+                                        <h4>{t('mcpConfig')}</h4>
                                         <button
                                             className="settings-help-btn"
                                             type="button"
@@ -1856,16 +1871,16 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                     </div>
                                     <div className="settings-grid">
                                         <div className="settings-field">
-                                            <label>MCP Server Port</label>
+                                            <label>{t('mcpPort')}</label>
                                             <input type="number" value={mcpPort} onChange={e => setMcpPort(Number(e.target.value))} />
                                         </div>
                                         <div className="settings-field">
-                                            <label>MCP Server Label</label>
+                                            <label>{t('mcpLabel')}</label>
                                             <input type="text" value={mcpLabel} onChange={e => setMcpLabel(e.target.value)} {...textAssistOffProps} />
                                             <span style={{ fontSize: '10px', opacity: 0.5 }}>LM Studio의 mcp.json에 설정할 라벨입니다.</span>
                                         </div>
                                     </div>
-                                    <h4 style={{ marginTop: '20px' }}>Tool Management</h4>
+                                    <h4 style={{ marginTop: '20px' }}>{t('toolManagement')}</h4>
                                     <div className="tool-toggle-list">
                                         {availableTools.map(tool => (
                                             <div key={tool.name} className="tool-toggle-item">
@@ -1878,12 +1893,12 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                     </div>
                                 </div>
                                 <div className="settings-section">
-                                    <h4>Command Safety</h4>
+                                    <h4>{t('commandSafety')}</h4>
                                     <div className="settings-grid">
                                         <div className="settings-field full">
                                             <div className="settings-field-header">
-                                                <label>Blocked Commands Patterns</label>
-                                                <button className="mini-reset-btn" onClick={() => setBlockedCommandPatterns(DEFAULT_BLOCKED_COMMAND_PATTERNS)}>기본값</button>
+                                                <label>{t('blockedCmds')}</label>
+                                                <button className="mini-reset-btn" onClick={() => setBlockedCommandPatterns(DEFAULT_BLOCKED_COMMAND_PATTERNS)}>{t('defaultBtn')}</button>
                                             </div>
                                             <textarea
                                                 className="settings-textarea"
@@ -1891,12 +1906,12 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                                 onChange={e => setBlockedCommandPatterns(e.target.value)}
                                                 {...textAssistOffProps}
                                             />
-                                            <span style={{ fontSize: '10px', opacity: 0.6 }}>한 줄에 하나씩 입력하세요. 일치하면 앱이 LLM 실행 전에 차단합니다.</span>
+                                            <span style={{ fontSize: '10px', opacity: 0.6 }}>{t('blockedHint')}</span>
                                         </div>
                                         <div className="settings-field full">
                                             <div className="settings-field-header">
-                                                <label>Approval Required Patterns</label>
-                                                <button className="mini-reset-btn" onClick={() => setApprovalCommandPatterns(DEFAULT_APPROVAL_COMMAND_PATTERNS)}>기본값</button>
+                                                <label>{t('requireApproval')}</label>
+                                                <button className="mini-reset-btn" onClick={() => setApprovalCommandPatterns(DEFAULT_APPROVAL_COMMAND_PATTERNS)}>{t('defaultBtn')}</button>
                                             </div>
                                             <textarea
                                                 className="settings-textarea"
@@ -1904,14 +1919,14 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                                 onChange={e => setApprovalCommandPatterns(e.target.value)}
                                                 {...textAssistOffProps}
                                             />
-                                            <span style={{ fontSize: '10px', opacity: 0.6 }}>한 줄에 하나씩 입력하세요. 일치하면 채팅창에서 취소/실행 승인을 요청합니다.</span>
+                                            <span style={{ fontSize: '10px', opacity: 0.6 }}>{t('approvalHint')}</span>
                                         </div>
                                     </div>
                                 </div>
                             </div>
                             <div className="settings-footer">
                                 <div className="settings-footer-copy">(C) 2026 DINKI&apos;ssTyle</div>
-                                <button className="save-btn" onClick={handleSaveSettings}>Apply & Save</button>
+                                <button className="save-btn" onClick={handleSaveSettings}>{t('applySave')}</button>
                             </div>
                         </div>
                     </div>
@@ -1920,7 +1935,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                     <div className="settings-overlay docs-overlay" onClick={() => setIsMcpDocsOpen(false)}>
                         <div className="docs-modal" onClick={e => e.stopPropagation()}>
                             <div className="docs-modal-header">
-                                <h3>MCP Setup Guide</h3>
+                                <h3>{t('mcpDocsTitle')}</h3>
                                 <button className="close-icon-btn" onClick={() => setIsMcpDocsOpen(false)}>×</button>
                             </div>
                             <div className="docs-modal-body">
