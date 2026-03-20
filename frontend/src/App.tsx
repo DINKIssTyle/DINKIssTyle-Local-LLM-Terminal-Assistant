@@ -387,6 +387,21 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
+    html = html.replace(/\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*\]/gi, (_, toolName) => {
+        const normalizedToolName = String(toolName || '').trim();
+        if (!normalizedToolName || normalizedToolName === 'execute_command' || normalizedToolName === 'send_keys') {
+            return _;
+        }
+
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>${escapeHtml(normalizedToolName.replace(/_/g, ' '))}</span>
+                <span class="progress-meta">Tool</span>
+            </div>
+            <div class="command-body"><code>(no arguments)</code></div>
+        </section>`);
+    });
+
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, language, code) => {
         return stash(`<pre><code class="language-${escapeHtml(language || 'plain')}">${escapeHtml(code.trim())}</code></pre>`);
     });
@@ -506,6 +521,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const bracketExecuteRegex = /\[EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*\]/i;
     const bracketSendKeysRegex = /\[SEND_KEYS:\s*(\[[\s\S]*?\])\s*\]/i;
     const bracketToolRegex = /\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*({[\s\S]*?})\s*\]/i;
+    const bracketToolNoArgsRegex = /\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*\]/i;
 
     const commandMatch = response.match(executeRegex);
     if (commandMatch) {
@@ -556,7 +572,19 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     }
 
     const bracketMatch = response.match(bracketToolRegex);
-    if (!bracketMatch) return null;
+    if (!bracketMatch) {
+        const noArgsMatch = response.match(bracketToolNoArgsRegex);
+        if (!noArgsMatch) return null;
+
+        const toolName = noArgsMatch[1].toLowerCase();
+        return {
+            raw: noArgsMatch[0],
+            toolName,
+            commandText: toolName,
+            parsedKeys: [],
+            toolArgs: '{}',
+        };
+    }
 
     try {
         const toolName = bracketMatch[1].toLowerCase();
@@ -718,6 +746,7 @@ const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
 const stripToolCallMarkup = (value: string): string => (
     value
         .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/g, '')
+        .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*\]/g, '')
         .replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"[\s\S]*?"\s*<<</g, '')
         .replace(/(?:>>>|<<<)\s*SEND_KEYS:\s*\[[\s\S]*?\]\s*<<</g, '')
         .replace(/\[EXECUTE_COMMAND:\s*"[\s\S]*?"\s*\]/g, '')
@@ -738,6 +767,7 @@ const needsContinuationAfterPlan = (response: string): boolean => {
         || /<report\b[\s\S]*?<\/report>/i.test(normalized)
         || /<artifact\b[\s\S]*?<\/artifact>/i.test(normalized)
         || /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/i.test(normalized)
+        || /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*\]/i.test(normalized)
         || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
         || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized);
 
