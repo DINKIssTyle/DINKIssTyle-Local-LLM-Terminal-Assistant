@@ -142,6 +142,19 @@ function getTagAttribute(source: string, attribute: string): string {
     return match ? match[1] : '';
 }
 
+function renderLooseHtmlBlock(htmlSource: string): string {
+    const normalized = htmlSource
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/div>/gi, '\n')
+        .replace(/<div[^>]*>/gi, '')
+        .replace(/<strong>([\s\S]*?)<\/strong>/gi, (_, content) => `**${content.trim()}**`)
+        .replace(/<[^>]+>/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+    return renderTextBlock(normalized);
+}
+
 function renderMarkdown(text: string): string {
     if (!text) return '';
 
@@ -156,6 +169,10 @@ function renderMarkdown(text: string): string {
 
     html = html.replace(/<analysis>([\s\S]*?)<\/analysis>/gi, (_, content) => {
         return stash(`<div class="message-block analysis-block"><span class="analysis-icon">Inspect</span><strong>${renderInlineMarkdown(content.trim())}</strong></div>`);
+    });
+
+    html = html.replace(/<div\b[^>]*>[\s\S]*?<\/div>/gi, (block) => {
+        return stash(`<section class="message-block">${renderLooseHtmlBlock(block)}</section>`);
     });
 
     html = html.replace(/<progress\b([^>]*)>([\s\S]*?)<\/progress>/gi, (_, attrs, content) => {
