@@ -179,6 +179,22 @@ func unwrapWindowsPowerShellCommand(command string) string {
 	return trimmed
 }
 
+func normalizeCommandForTerminal(command string) string {
+	normalized := strings.TrimSpace(command)
+	if normalized == "" {
+		return normalized
+	}
+
+	// Models often emit heredoc bodies as literal "\n" sequences on a single line.
+	// Convert them back to real newlines before writing to the PTY so EOF terminators
+	// can be recognized by the shell.
+	if strings.Contains(normalized, "<<") && strings.Contains(normalized, `\n`) && !strings.Contains(normalized, "\n") {
+		normalized = strings.ReplaceAll(normalized, `\n`, "\n")
+	}
+
+	return normalized
+}
+
 func normalizeAPIBaseURL(raw string) string {
 	normalized := strings.TrimSpace(raw)
 	if normalized == "" {
@@ -350,6 +366,7 @@ func (a *App) startup(ctx context.Context) {
 		}
 
 		normalized = unwrapWindowsPowerShellCommand(normalized)
+		normalized = normalizeCommandForTerminal(normalized)
 
 		a.mu.Lock()
 		term := a.terminals[activeId]

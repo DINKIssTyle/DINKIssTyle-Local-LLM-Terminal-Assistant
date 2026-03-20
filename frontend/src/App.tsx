@@ -137,6 +137,11 @@ function renderStructuredItems(items: Array<{ num: string; text: string }>): str
         .join('');
 }
 
+function getTagAttribute(source: string, attribute: string): string {
+    const match = source.match(new RegExp(`${attribute}="([^"]*)"`, 'i'));
+    return match ? match[1] : '';
+}
+
 function renderMarkdown(text: string): string {
     if (!text) return '';
 
@@ -153,7 +158,9 @@ function renderMarkdown(text: string): string {
         return stash(`<div class="message-block analysis-block"><span class="analysis-icon">Inspect</span><strong>${renderInlineMarkdown(content.trim())}</strong></div>`);
     });
 
-    html = html.replace(/<progress title="([^"]*)" description="([^"]*)">([\s\S]*?)<\/progress>/gi, (_, title, desc, content) => {
+    html = html.replace(/<progress\b([^>]*)>([\s\S]*?)<\/progress>/gi, (_, attrs, content) => {
+        const title = getTagAttribute(attrs, 'title') || 'Working Step';
+        const desc = getTagAttribute(attrs, 'description');
         const items = content
             .split('\n')
             .map((line: string) => line.trim())
@@ -168,7 +175,7 @@ function renderMarkdown(text: string): string {
 
         return stash(`<section class="message-block progress-block">
             <div class="progress-header"><span>${renderInlineMarkdown(title)}</span><span class="progress-meta">Progress</span></div>
-            <div class="progress-description">${renderInlineMarkdown(desc)}</div>
+            ${desc ? `<div class="progress-description">${renderInlineMarkdown(desc)}</div>` : ''}
             <div class="progress-list">${items}</div>
         </section>`);
     });
@@ -182,7 +189,9 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
-    html = html.replace(/<tasklist title="([^"]*)" description="([^"]*)">([\s\S]*?)<\/tasklist>/gi, (_, title, desc, content) => {
+    html = html.replace(/<tasklist\b([^>]*)>([\s\S]*?)<\/tasklist>/gi, (_, attrs, content) => {
+        const title = getTagAttribute(attrs, 'title') || 'Execution Plan';
+        const desc = getTagAttribute(attrs, 'description');
         const items = renderStructuredItems(extractStructuredListItems(content));
 
         return stash(`<section class="message-block tasklist-block">
@@ -190,12 +199,14 @@ function renderMarkdown(text: string): string {
                 <span>${renderInlineMarkdown(title)}</span>
                 <span class="progress-meta">Tasks</span>
             </div>
-            <div class="progress-description">${renderInlineMarkdown(desc)}</div>
+            ${desc ? `<div class="progress-description">${renderInlineMarkdown(desc)}</div>` : ''}
             <div class="progress-list">${items}</div>
         </section>`);
     });
 
-    html = html.replace(/<walkthrough title="([^"]*)" description="([^"]*)">([\s\S]*?)<\/walkthrough>/gi, (_, title, desc, content) => {
+    html = html.replace(/<walkthrough\b([^>]*)>([\s\S]*?)<\/walkthrough>/gi, (_, attrs, content) => {
+        const title = getTagAttribute(attrs, 'title') || 'What I Did';
+        const desc = getTagAttribute(attrs, 'description');
         const items = renderStructuredItems(extractStructuredListItems(content));
 
         return stash(`<section class="message-block walkthrough-block">
@@ -203,12 +214,14 @@ function renderMarkdown(text: string): string {
                 <span>${renderInlineMarkdown(title)}</span>
                 <span class="progress-meta">Walkthrough</span>
             </div>
-            <div class="progress-description">${renderInlineMarkdown(desc)}</div>
+            ${desc ? `<div class="progress-description">${renderInlineMarkdown(desc)}</div>` : ''}
             <div class="progress-list">${items}</div>
         </section>`);
     });
 
-    html = html.replace(/<report title="([^"]*)" description="([^"]*)">([\s\S]*?)<\/report>/gi, (_, title, desc, content) => {
+    html = html.replace(/<report\b([^>]*)>([\s\S]*?)<\/report>/gi, (_, attrs, content) => {
+        const title = getTagAttribute(attrs, 'title') || 'Completion Report';
+        const desc = getTagAttribute(attrs, 'description');
         const items = renderStructuredItems(extractStructuredListItems(content));
 
         return stash(`<section class="message-block report-block">
@@ -216,7 +229,7 @@ function renderMarkdown(text: string): string {
                 <span>${renderInlineMarkdown(title)}</span>
                 <span class="progress-meta">Report</span>
             </div>
-            <div class="progress-description">${renderInlineMarkdown(desc)}</div>
+            ${desc ? `<div class="progress-description">${renderInlineMarkdown(desc)}</div>` : ''}
             <div class="progress-list">${items}</div>
         </section>`);
     });
@@ -247,7 +260,7 @@ function renderMarkdown(text: string): string {
 
     html = html.replace(/<\/artifact>/gi, '');
 
-    html = html.replace(/>>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</g, (_, command) => {
+    html = html.replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</g, (_, command) => {
         return stash(`<section class="message-block command-block">
             <div class="command-header">
                 <span>Run In Terminal</span>
@@ -257,7 +270,27 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
-    html = html.replace(/>>>\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</g, (_, keysJson) => {
+    html = html.replace(/(?:>>>|<<<)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</g, (_, keysJson) => {
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>Send Keys</span>
+                <span class="progress-meta">Action</span>
+            </div>
+            <div class="command-body"><code>${escapeHtml(keysJson.trim())}</code></div>
+        </section>`);
+    });
+
+    html = html.replace(/\[EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*\]/gi, (_, command) => {
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>Run In Terminal</span>
+                <span class="progress-meta">Action</span>
+            </div>
+            <div class="command-body"><code>${escapeHtml(command.trim())}</code></div>
+        </section>`);
+    });
+
+    html = html.replace(/\[SEND_KEYS:\s*(\[[\s\S]*?\])\s*\]/gi, (_, keysJson) => {
         return stash(`<section class="message-block command-block">
             <div class="command-header">
                 <span>Send Keys</span>
@@ -451,8 +484,10 @@ const parseSendKeysPayload = (payload: string): string[] | null => {
 };
 
 const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
-    const executeRegex = />>>\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
-    const sendKeysRegex = />>>\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
+    const executeRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
+    const sendKeysRegex = /(?:>>>|<<<)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
+    const bracketExecuteRegex = /\[EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*\]/i;
+    const bracketSendKeysRegex = /\[SEND_KEYS:\s*(\[[\s\S]*?\])\s*\]/i;
     const bracketToolRegex = /\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*({[\s\S]*?})\s*\]/i;
 
     const commandMatch = response.match(executeRegex);
@@ -474,6 +509,30 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
             raw: keyMatch[0],
             toolName: 'send_keys',
             commandText: keyMatch[1],
+            parsedKeys,
+            toolArgs: JSON.stringify({ keys: parsedKeys }),
+        };
+    }
+
+    const bracketExecuteMatch = response.match(bracketExecuteRegex);
+    if (bracketExecuteMatch) {
+        const command = bracketExecuteMatch[1];
+        return {
+            raw: bracketExecuteMatch[0],
+            toolName: 'execute_command',
+            commandText: command,
+            parsedKeys: [],
+            toolArgs: JSON.stringify({ command }),
+        };
+    }
+
+    const bracketSendKeysMatch = response.match(bracketSendKeysRegex);
+    if (bracketSendKeysMatch) {
+        const parsedKeys = parseSendKeysPayload(bracketSendKeysMatch[1]) || [];
+        return {
+            raw: bracketSendKeysMatch[0],
+            toolName: 'send_keys',
+            commandText: bracketSendKeysMatch[1],
             parsedKeys,
             toolArgs: JSON.stringify({ keys: parsedKeys }),
         };
@@ -628,11 +687,69 @@ const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
 const stripToolCallMarkup = (value: string): string => (
     value
         .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/g, '')
-        .replace(/>>>\s*EXECUTE_COMMAND:\s*"[\s\S]*?"\s*<<</g, '')
-        .replace(/>>>\s*SEND_KEYS:\s*\[[\s\S]*?\]\s*<<</g, '')
+        .replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"[\s\S]*?"\s*<<</g, '')
+        .replace(/(?:>>>|<<<)\s*SEND_KEYS:\s*\[[\s\S]*?\]\s*<<</g, '')
+        .replace(/\[EXECUTE_COMMAND:\s*"[\s\S]*?"\s*\]/g, '')
+        .replace(/\[SEND_KEYS:\s*\[[\s\S]*?\]\s*\]/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim()
 );
+
+const needsContinuationAfterPlan = (response: string): boolean => {
+    const normalized = response.trim();
+    if (!normalized) return false;
+
+    const hasTasklist = /<tasklist\b[\s\S]*?<\/tasklist>/i.test(normalized);
+    if (!hasTasklist) return false;
+
+    const hasExecutionEvidence =
+        /<walkthrough\b[\s\S]*?<\/walkthrough>/i.test(normalized)
+        || /<report\b[\s\S]*?<\/report>/i.test(normalized)
+        || /<artifact\b[\s\S]*?<\/artifact>/i.test(normalized)
+        || /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/i.test(normalized)
+        || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
+        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized);
+
+    return !hasExecutionEvidence;
+};
+
+const isInteractiveTerminalLaunch = (commandText: string): boolean => {
+    const normalized = commandText.trim().toLowerCase();
+    if (!normalized) return false;
+
+    return /(^|\s)(nano|pico|vim|vi|nvim|less|more|man|top|htop)(\s|$)/.test(normalized);
+};
+
+const detectInteractiveLaunchState = (commandText: string, terminalText: string): 'opened' | 'not_opened' | 'unknown' => {
+    const normalized = commandText.trim().toLowerCase();
+    const upper = terminalText.toUpperCase();
+    const lastLine = terminalText
+        .split('\n')
+        .map(line => line.trimEnd())
+        .filter(line => line.trim().length > 0)
+        .slice(-1)[0]
+        ?.trim() || '';
+
+    if (/(^|\s)(nano|pico)(\s|$)/.test(normalized)) {
+        if (upper.includes('UW PICO') || upper.includes('GNU NANO') || upper.includes('^X EXIT')) return 'opened';
+        if (/[%#$]\s*$/.test(lastLine)) return 'not_opened';
+        return 'unknown';
+    }
+
+    if (/(^|\s)(vim|vi|nvim)(\s|$)/.test(normalized)) {
+        if (upper.includes('-- INSERT --') || upper.includes('VIM') || /\bE\d+:/i.test(terminalText)) return 'opened';
+        if (/[%#$]\s*$/.test(lastLine)) return 'not_opened';
+        return 'unknown';
+    }
+
+    if (/(^|\s)(less|more|man)(\s|$)/.test(normalized)) {
+        if (upper.includes('(END)') || upper.includes('MANUAL PAGE') || upper.includes('PRESS H FOR HELP OR Q TO QUIT')) return 'opened';
+        if (/[%#$]\s*$/.test(lastLine)) return 'not_opened';
+        return 'unknown';
+    }
+
+    return 'unknown';
+};
 
 const detectWindowsCmdSyntax = (command: string): string | null => {
     const normalized = command.trim().toLowerCase();
@@ -1257,6 +1374,57 @@ ${t('greeting')}`
         return '';
     };
 
+    const getRecentMeaningfulTerminalLines = (terminalText: string, count = 8): string[] => {
+        const lines = terminalText
+            .split('\n')
+            .map(line => line.trimEnd())
+            .filter(line => line.trim().length > 0);
+
+        return lines.slice(-count);
+    };
+
+    const getLastMeaningfulTerminalLine = (terminalText: string): string => {
+        const lines = getRecentMeaningfulTerminalLines(terminalText, 1);
+        return lines.length > 0 ? lines[lines.length - 1] : '';
+    };
+
+    const looksLikeShellPromptLine = (line: string): boolean => {
+        const trimmed = line.trim();
+        if (!trimmed) return false;
+        if (/HEREDOC>\s*$/i.test(trimmed)) return false;
+        if (/UW PICO|GNU NANO|\^X EXIT|\(END\)|MANUAL PAGE/i.test(trimmed)) return false;
+
+        return /[%#$]\s*$/.test(trimmed)
+            || /^[^ \n]+@[^ \n]+.*[%#$]\s*$/.test(trimmed)
+            || /(?:^|\/)[^/\n]+\s[%#$]\s*$/.test(trimmed);
+    };
+
+    const hasRecoveredShellPrompt = (terminalText: string): boolean => {
+        return getRecentMeaningfulTerminalLines(terminalText, 5).some(looksLikeShellPromptLine);
+    };
+
+    const detectTerminalBlockerState = (terminalText: string): string | null => {
+        if (hasRecoveredShellPrompt(terminalText)) {
+            return null;
+        }
+
+        const recentUpper = getRecentMeaningfulTerminalLines(terminalText, 12).join('\n').toUpperCase();
+
+        if (recentUpper.includes('HEREDOC>')) {
+            return 'heredoc 입력이 아직 종료되지 않아 쉘 프롬프트로 돌아오지 못했습니다.';
+        }
+
+        if (recentUpper.includes('UW PICO') || recentUpper.includes('GNU NANO') || recentUpper.includes('^X EXIT')) {
+            return 'nano/pico 편집기가 아직 열려 있어 명령이 끝난 상태로 볼 수 없습니다.';
+        }
+
+        if (recentUpper.includes('(END)') || recentUpper.includes('MANUAL PAGE')) {
+            return 'pager/매뉴얼 화면이 아직 열려 있어 명령이 끝난 상태로 볼 수 없습니다.';
+        }
+
+        return null;
+    };
+
     const summarizeTerminalTail = async (
         userRequest: string,
         commandText: string,
@@ -1292,6 +1460,9 @@ ${t('greeting')}`
         }
 
         if (toolName === 'execute_command') {
+            if (isInteractiveTerminalLaunch(commandText)) {
+                return `\`${commandText}\` 명령을 실행했고 인터랙티브 프로그램이 열렸습니다. 왼쪽 터미널에서 이어서 확인할 수 있습니다.`;
+            }
             return `\`${commandText}\` 명령을 터미널로 보냈습니다. 결과는 왼쪽 터미널에서 확인하세요.`;
         }
 
@@ -1309,12 +1480,38 @@ ${t('greeting')}`
         baseSystemPrompt: string,
         responseSansCommand: string,
     ) => {
-        if (toolName !== 'execute_command' || !shouldInspectTerminalAfterCommand(commandText)) {
+        if (toolName !== 'execute_command' && toolName !== 'send_keys') {
+            return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
+        }
+
+        if (toolName === 'execute_command' && !shouldInspectTerminalAfterCommand(commandText)) {
             return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
         }
 
         const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 4000, idleMs: 1200 });
         const tail = await CallTool('read_terminal_tail', tailArgs);
+        const visibleTerminal = getVisibleTerminalText();
+        const combinedTerminal = `${visibleTerminal}\n${tail}`;
+        const promptRecovered = hasRecoveredShellPrompt(visibleTerminal) || hasRecoveredShellPrompt(tail);
+
+        if (toolName === 'execute_command' && isInteractiveTerminalLaunch(commandText)) {
+            const interactiveState = detectInteractiveLaunchState(commandText, combinedTerminal);
+            if (interactiveState === 'opened') {
+                return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
+            }
+            if (interactiveState === 'not_opened') {
+                return `작업이 실패했습니다. \`${commandText}\` 실행 후에도 인터랙티브 프로그램이 열린 흔적이 보이지 않고 쉘 프롬프트로 돌아와 있습니다.`;
+            }
+        }
+
+        if (toolName === 'send_keys' && promptRecovered) {
+            return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
+        }
+
+        const blocker = detectTerminalBlockerState(combinedTerminal);
+        if (blocker) {
+            return `작업이 아직 진행 중이거나 완료 여부가 불분명합니다. ${blocker}`;
+        }
 
         return summarizeTerminalTail(getLatestUserRequest(historyToSend), commandText, tail, [...historyToSend], baseSystemPrompt);
     };
@@ -1342,6 +1539,65 @@ ${t('greeting')}`
             break;
         }
         return cleaned;
+    };
+
+    const extractHeredocTerminator = (terminalText: string): string | null => {
+        const matches = [...terminalText.matchAll(/<<\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/g)];
+        if (matches.length === 0) return null;
+        const last = matches[matches.length - 1];
+        return last?.[1] || null;
+    };
+
+    const normalizeSendKeysForTerminal = (keys: string[]): { keys: string[]; reason?: string } => {
+        const normalized = normalizeShortcutTokens(keys);
+        const terminalText = getVisibleTerminalText();
+        const upperTerminal = terminalText.toUpperCase();
+        const looksLikeNano = upperTerminal.includes('UW PICO') || upperTerminal.includes('GNU NANO') || upperTerminal.includes('^X EXIT');
+        const looksLikeVim = upperTerminal.includes('-- INSERT --')
+            || upperTerminal.includes('-- NORMAL --')
+            || upperTerminal.includes('~')
+            || upperTerminal.includes(' E486:')
+            || upperTerminal.includes('VIM');
+        const looksLikePager = upperTerminal.includes('MANUAL PAGE')
+            || upperTerminal.includes('(END)')
+            || upperTerminal.includes('LINES ')
+            || upperTerminal.includes('PRESS H FOR HELP OR Q TO QUIT');
+        const looksLikeHeredoc = upperTerminal.includes('HEREDOC>');
+        const heredocTerminator = looksLikeHeredoc ? extractHeredocTerminator(terminalText) : null;
+        const looksLikeVimQuitAttempt = normalized.some(token => token.includes(':Q')) || normalized.includes('ESC');
+        const asksForInterrupt = normalized.includes('CTRL_C');
+        const asksForNanoExit = normalized.includes('CTRL_X');
+        const asksForPagerQuit = normalized.includes('Q');
+
+        if (looksLikeNano && (looksLikeVimQuitAttempt || asksForInterrupt) && !asksForNanoExit) {
+            return {
+                keys: ['CTRL_X'],
+                reason: 'Detected nano/pico on screen, so remapped the quit sequence to CTRL_X.',
+            };
+        }
+
+        if (looksLikeVim && asksForNanoExit) {
+            return {
+                keys: ['ESC', ':q!', 'ENTER'],
+                reason: 'Detected vim-style editor on screen, so remapped CTRL_X to ESC, :q!, ENTER.',
+            };
+        }
+
+        if (looksLikePager && (looksLikeVimQuitAttempt || asksForInterrupt || asksForNanoExit) && !asksForPagerQuit) {
+            return {
+                keys: ['q'],
+                reason: 'Detected pager/help view on screen, so remapped the quit sequence to q.',
+            };
+        }
+
+        if (looksLikeHeredoc && heredocTerminator && (looksLikeVimQuitAttempt || asksForInterrupt || asksForNanoExit)) {
+            return {
+                keys: [heredocTerminator, 'ENTER'],
+                reason: `Detected heredoc prompt on screen, so remapped the quit sequence to ${heredocTerminator} + ENTER.`,
+            };
+        }
+
+        return { keys };
     };
 
     const handleAppLevelSendKeys = (keys: string[]): string | null => {
@@ -1566,6 +1822,34 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 }
             }
 
+            if (!isCurrentRequest()) return;
+            if (needsContinuationAfterPlan(response)) {
+                ensureAssistantPlaceholder();
+                setCurrentThinking('');
+                currentThinkingRef.current = '';
+                setIsThinking(true);
+                const continuationHistory = [
+                    ...loopHistory,
+                    { role: 'assistant' as const, content: response },
+                    {
+                        role: 'user' as const,
+                        content: '[App Notice] The previous reply stopped after an Execution Plan and did not actually carry out the task yet. Continue from that plan now and perform the next concrete action instead of restating the plan.',
+                    },
+                ];
+                response = await FetchLLMResponse(
+                    apiUrl,
+                    apiKey,
+                    modelName,
+                    maxTokens,
+                    temperature,
+                    provider,
+                    true,
+                    buildLLMMessages(continuationHistory, baseSystemPrompt),
+                );
+                if (!isCurrentRequest()) return;
+                setIsThinking(false);
+            }
+
             let toolLoopCount = 0;
             while (true) {
                 if (!isCurrentRequest()) return;
@@ -1578,6 +1862,16 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 const parsedToolCall = parseToolCallFromResponse(response);
                 if (parsedToolCall) {
                     const { raw, toolName, commandText, parsedKeys, toolArgs } = parsedToolCall;
+                    const normalizedSendKeys = toolName === 'send_keys'
+                        ? normalizeSendKeysForTerminal(parsedKeys)
+                        : null;
+                    const effectiveParsedKeys = normalizedSendKeys?.keys || parsedKeys;
+                    const effectiveCommandText = toolName === 'send_keys'
+                        ? JSON.stringify(effectiveParsedKeys)
+                        : commandText;
+                    const effectiveToolArgs = toolName === 'send_keys'
+                        ? JSON.stringify({ keys: effectiveParsedKeys })
+                        : toolArgs;
                     const commandPolicy = classifyCommand(commandText);
                     const windowsCmdSyntaxError = toolName === 'execute_command' && window.navigator.platform.toLowerCase().includes('win')
                         ? detectWindowsCmdSyntax(commandText)
@@ -1591,14 +1885,14 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         ensureAssistantPlaceholder();
                         setCurrentThinking('');
                         currentThinkingRef.current = '';
-                        setIsThinking(true);
-                        response = await continueAfterToolExecution(
-                            toolName,
-                            toolArgs,
-                            `Error: tool not available: ${toolName}. Use one of the explicitly available tools. For file creation on Windows, use EXECUTE_COMMAND with PowerShell such as Set-Content or Out-File.`,
-                            loopHistory,
-                            baseSystemPrompt,
-                            response,
+                            setIsThinking(true);
+                            response = await continueAfterToolExecution(
+                                toolName,
+                                effectiveToolArgs,
+                                `Error: tool not available: ${toolName}. Use one of the explicitly available tools. For file creation on Windows, use EXECUTE_COMMAND with PowerShell such as Set-Content or Out-File.`,
+                                loopHistory,
+                                baseSystemPrompt,
+                                response,
                         );
                         if (!isCurrentRequest()) return;
                         setIsThinking(false);
@@ -1673,14 +1967,14 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
 
                     try {
                         const result = toolName === 'send_keys'
-                            ? (handleAppLevelSendKeys(parsedKeys) ?? await CallTool(toolName, toolArgs))
-                            : await CallTool(toolName, toolArgs);
+                            ? (handleAppLevelSendKeys(effectiveParsedKeys) ?? await CallTool(toolName, effectiveToolArgs))
+                            : await CallTool(toolName, effectiveToolArgs);
                         if (!isCurrentRequest()) return;
                         console.log(`[MCP] Tool ${toolName} result:`, result);
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
-                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${commandText}\`\n\nStatus: ${result}`
+                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${effectiveCommandText}\`${normalizedSendKeys?.reason ? `\n\nRemap: ${normalizedSendKeys.reason}` : ''}\n\nStatus: ${result}`
                         };
                         setMessages(prev => {
                             const next = [...prev, toolResultForUi];
@@ -1700,7 +1994,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             });
                             response = await continueAfterToolExecution(
                                 toolName,
-                                toolArgs,
+                                effectiveToolArgs,
                                 result,
                                 loopHistory,
                                 baseSystemPrompt,
@@ -1709,7 +2003,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             if (!isCurrentRequest()) return;
                             setIsThinking(false);
                         } else {
-                            appendToolResultToHistory(loopHistory, toolName, toolArgs, result);
+                            appendToolResultToHistory(loopHistory, toolName, effectiveToolArgs, result);
                             ensureAssistantPlaceholder();
                             setCurrentThinking('');
                             currentThinkingRef.current = '';
@@ -1722,7 +2016,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             });
                             response = await inspectTerminalIfNeeded(
                                 toolName,
-                                commandText,
+                                effectiveCommandText,
                                 loopHistory,
                                 baseSystemPrompt,
                                 response,
