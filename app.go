@@ -678,7 +678,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 						continue
 					case "model_load.progress":
 						pct := readProgressPercent(eventData)
-						emitLLMProgress(a.ctx, "model-load", fmt.Sprintf("Loading Model... %d%%", pct), pct, true)
+						emitLLMProgress(a.ctx, "model-load", "Loading Model...", pct, true)
 						currentEventType = ""
 						continue
 					case "model_load.end":
@@ -691,7 +691,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 						continue
 					case "prompt_processing.progress":
 						pct := readProgressPercent(eventData)
-						emitLLMProgress(a.ctx, "prompt-processing", fmt.Sprintf("Processing Prompt... %d%%", pct), pct, true)
+						emitLLMProgress(a.ctx, "prompt-processing", "Processing Prompt...", pct, true)
 						currentEventType = ""
 						continue
 					case "prompt_processing.end":

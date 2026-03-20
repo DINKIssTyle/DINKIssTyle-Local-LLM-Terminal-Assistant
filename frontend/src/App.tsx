@@ -649,11 +649,12 @@ const LLMProgressCard = ({ progress }: { progress: LLMProgressState | null }) =>
     if (!progress?.active) return null;
     const normalizedPercent = Math.max(0, Math.min(100, progress.percent));
     const isIndeterminate = normalizedPercent <= 0;
+    const labelText = progress.label.replace(/\s+\d+%$/, '');
 
     return (
         <div className={`llm-progress-card ${progress.phase} ${isIndeterminate ? 'indeterminate' : ''}`}>
             <div className="llm-progress-text">
-                <span className="llm-progress-label">{progress.label}</span>
+                <span className="llm-progress-label">{labelText}</span>
                 <span className="llm-progress-percent">{isIndeterminate ? '...' : `${Math.round(normalizedPercent)}%`}</span>
             </div>
             <div className="llm-progress-track">
@@ -1311,14 +1312,14 @@ ${t('greeting')}`
     const confirmAndCloseActiveTab = () => {
         if (tabs.length === 1) return;
         const activeTab = tabs.find(tab => tab.id === activeTabId);
-        const shouldClose = window.confirm(`${activeTab?.name || '현재 탭'}을(를) 닫을까요?`);
+        const shouldClose = window.confirm(t('confirmCloseTab').replace('{name}', activeTab?.name || 'Tab'));
         if (!shouldClose) return;
         removeTabById(activeTabId);
     };
 
     const getVisibleTerminalText = (): string => {
         const term = xtermsRef.current[activeTabId] as any;
-        if (!term?.buffer?.active) return 'Terminal text unavailable.';
+        if (!term?.buffer?.active) return t('terminalUnavailable');
 
         const buffer = term.buffer.active;
         const preferredStart = typeof buffer.viewportY === 'number'
@@ -1328,14 +1329,7 @@ ${t('greeting')}`
         const end = Math.min(buffer.length - 1, start + Math.max(term.rows - 1, 0));
         const lines: string[] = [];
 
-        for (let i = start; i <= end; i += 1) {
-            const line = buffer.getLine(i);
-            if (!line) continue;
-            const text = line.translateToString(true).trimEnd();
-            if (text) lines.push(text);
-        }
-
-        return lines.join('\n') || 'Terminal viewport is currently empty.';
+        return lines.join('\n') || t('terminalEmpty');
     };
 
     const getCondensedVisibleTerminalText = (): string => {
@@ -1361,7 +1355,7 @@ ${t('greeting')}`
             'VISIBLE_TERMINAL:',
             getCondensedVisibleTerminalText(),
             'VISIBLE_CHAT:',
-            visibleChat || 'No visible chat messages.',
+            visibleChat || t('chatEmpty'),
         ].join('\n');
     };
 
@@ -1416,7 +1410,7 @@ ${t('greeting')}`
         if (blockedMatch) {
             return {
                 status: 'blocked',
-                reason: `차단 규칙 "${blockedMatch}" 과 일치하여 앱이 실행을 막았습니다.`,
+                reason: t('blockedReason').replace('{rule}', blockedMatch),
             };
         }
 
@@ -1424,7 +1418,7 @@ ${t('greeting')}`
         if (approvalMatch) {
             return {
                 status: 'approval',
-                reason: `승인 규칙 "${approvalMatch}" 과 일치하여 사용자 확인이 필요합니다.`,
+                reason: t('approvalReason').replace('{rule}', approvalMatch),
             };
         }
 
@@ -1572,15 +1566,15 @@ ${t('greeting')}`
         const recentUpper = getRecentMeaningfulTerminalLines(terminalText, 12).join('\n').toUpperCase();
 
         if (recentUpper.includes('HEREDOC>')) {
-            return 'heredoc 입력이 아직 종료되지 않아 쉘 프롬프트로 돌아오지 못했습니다.';
+            return t('heredocPending');
         }
 
         if (recentUpper.includes('UW PICO') || recentUpper.includes('GNU NANO') || recentUpper.includes('^X EXIT')) {
-            return 'nano/pico 편집기가 아직 열려 있어 명령이 끝난 상태로 볼 수 없습니다.';
+            return t('editorOpen');
         }
 
         if (recentUpper.includes('(END)') || recentUpper.includes('MANUAL PAGE')) {
-            return 'pager/매뉴얼 화면이 아직 열려 있어 명령이 끝난 상태로 볼 수 없습니다.';
+            return t('pagerOpen');
         }
 
         return null;
@@ -1595,7 +1589,7 @@ ${t('greeting')}`
     ) => {
         const analysisPrompt = `${baseSystemPrompt}
 5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal command that was run for that request, and the terminal output that appeared after it. Answer the user's request directly using the terminal result, not by merely describing the command. If the request asks for a fact like CPU, version, file name, or status, state that fact plainly in the first sentence.
-6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and mention the supporting evidence briefly. If it failed, start with "작업이 실패했습니다." and explain why. If the result is still inconclusive, start with "작업이 아직 진행 중이거나 완료 여부가 불분명합니다." and explain what is missing. If terminal output alone is inconclusive, use SCREEN_CONTEXT to check whether the prompt returned or the visible app state suggests completion. Do not emit tool calls in this follow-up summary.
+6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and mention the supporting evidence briefly. If it failed, start with "${t('workFailed')}" and explain why. If the result is still inconclusive, start with "${t('workIncomplete')}" and explain what is missing. If terminal output alone is inconclusive, use SCREEN_CONTEXT to check whether the prompt returned or the visible app state suggests completion. Do not emit tool calls in this follow-up summary.
 7. If COMPLEX TASK MODE applies, preserve the same runbook style and end with a <report> block instead of a plain summary when possible.`;
 
         const terminalContext: Message[] = [
@@ -2081,7 +2075,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 if (!isCurrentRequest()) return;
                 toolLoopCount += 1;
                 if (toolLoopCount > 8) {
-                    response = `${response ? `${response}\n\n` : ''}작업이 여러 단계로 계속 이어지고 있어 여기서 중단했습니다. 다음 단계가 더 필요하면 이어서 진행하겠습니다.`;
+                    response = `${response ? `${response}\n\n` : ''}${t('loopLimitReached')}`;
                     break;
                 }
 
@@ -2423,8 +2417,8 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                                 </div>
                                                 {m.commandRequest.status === 'approval' && (
                                                     <div className="command-approval-actions">
-                                                        <button className="approval-cancel-btn" onClick={() => handleCommandApprovalDecision(false)}>취소</button>
-                                                        <button className="approval-run-btn" onClick={() => handleCommandApprovalDecision(true)}>실행</button>
+                                                        <button className="approval-cancel-btn" onClick={() => handleCommandApprovalDecision(false)}>{t('close')}</button>
+                                                        <button className="approval-run-btn" onClick={() => handleCommandApprovalDecision(true)}>{t('run')}</button>
                                                     </div>
                                                 )}
                                             </div>
@@ -2451,13 +2445,13 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                 {...textAssistOffProps}
                             ></textarea>
                             {isLoading ? (
-                                <button className="stop-btn" onClick={handleStop} title="정지" aria-label="정지">
+                                <button className="stop-btn" onClick={handleStop} title={t('stop')} aria-label={t('stop')}>
                                     <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
                                         <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>
                                     </svg>
                                 </button>
                             ) : (
-                                <button className="send-btn" onClick={sendMessage} title="전송" aria-label="전송">
+                                <button className="send-btn" onClick={sendMessage} title={t('send')} aria-label={t('send')}>
                                     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                         <path d="M5 12h12"></path>
                                         <path d="M13 5l7 7-7 7"></path>
@@ -2575,8 +2569,8 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                             className="settings-help-btn"
                                             type="button"
                                             onClick={() => setIsMcpDocsOpen(true)}
-                                            title="MCP 설정 문서 보기"
-                                            aria-label="MCP 설정 문서 보기"
+                                            title={t('mcpDocsBtn')}
+                                            aria-label={t('mcpDocsBtn')}
                                         >
                                             ?
                                         </button>
@@ -2589,7 +2583,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                         <div className="settings-field">
                                             <label>{t('mcpLabel')}</label>
                                             <input type="text" value={mcpLabel} onChange={e => setMcpLabel(e.target.value)} {...textAssistOffProps} />
-                                            <span style={{ fontSize: '10px', opacity: 0.5 }}>LM Studio의 mcp.json에 설정할 라벨입니다.</span>
+                                            <span style={{ fontSize: '10px', opacity: 0.5 }}>{t('mcpLabelHint')}</span>
                                         </div>
                                     </div>
                                     <h4 style={{ marginTop: '20px' }}>{t('toolManagement')}</h4>
