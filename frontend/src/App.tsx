@@ -8,6 +8,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './App.css';
+import mcpDocsContent from './assets/docs/mcp.md?raw';
 import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
 import { EventsOn, EventsEmit } from "../wailsjs/runtime/runtime";
 
@@ -674,6 +675,7 @@ function App() {
     const [tabs, setTabs] = useState<Tab[]>([{ id: '1', name: 'Tab 1' }]);
     const [activeTabId, setActiveTabId] = useState('1');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [isMcpDocsOpen, setIsMcpDocsOpen] = useState(false);
 
     // Settings with persistence
     const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('apiUrl') || 'localhost:1234');
@@ -745,6 +747,7 @@ function App() {
     const handleSaveSettings = () => {
         UpdateMCPSettings(mcpPort, mcpLabel);
         setIsSettingsOpen(false);
+        setIsMcpDocsOpen(false);
     };
 
     useEffect(() => {
@@ -752,6 +755,12 @@ function App() {
             console.error('[MCP] Failed to apply persisted MCP settings on startup:', error);
         });
     }, []);
+
+    useEffect(() => {
+        if (!isSettingsOpen) {
+            setIsMcpDocsOpen(false);
+        }
+    }, [isSettingsOpen]);
 
     useEffect(() => {
         SetActiveTab(activeTabId);
@@ -1833,7 +1842,18 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                     </div>
                                 </div>
                                 <div className="settings-section">
-                                    <h4>MCP Gateway Configuration</h4>
+                                    <div className="settings-section-title">
+                                        <h4>MCP Gateway Configuration</h4>
+                                        <button
+                                            className="settings-help-btn"
+                                            type="button"
+                                            onClick={() => setIsMcpDocsOpen(true)}
+                                            title="MCP 설정 문서 보기"
+                                            aria-label="MCP 설정 문서 보기"
+                                        >
+                                            ?
+                                        </button>
+                                    </div>
                                     <div className="settings-grid">
                                         <div className="settings-field">
                                             <label>MCP Server Port</label>
@@ -1892,6 +1912,19 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                             <div className="settings-footer">
                                 <div className="settings-footer-copy">(C) 2026 DINKI&apos;ssTyle</div>
                                 <button className="save-btn" onClick={handleSaveSettings}>Apply & Save</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                {isMcpDocsOpen && (
+                    <div className="settings-overlay docs-overlay" onClick={() => setIsMcpDocsOpen(false)}>
+                        <div className="docs-modal" onClick={e => e.stopPropagation()}>
+                            <div className="docs-modal-header">
+                                <h3>MCP Setup Guide</h3>
+                                <button className="close-icon-btn" onClick={() => setIsMcpDocsOpen(false)}>×</button>
+                            </div>
+                            <div className="docs-modal-body">
+                                <div className="bubble docs-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(mcpDocsContent) }} />
                             </div>
                         </div>
                     </div>
