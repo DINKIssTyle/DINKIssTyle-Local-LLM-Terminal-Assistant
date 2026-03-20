@@ -1,6 +1,6 @@
 /*
-    Created by DINKIssTyle on 2026.
-    Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
+   Created by DINKIssTyle on 2026.
+   Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 */
 
 package main
@@ -9,6 +9,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"dkst-terminal-assistant/mcp"
+	"dkst-terminal-assistant/terminal"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,8 +20,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"dkst-terminal-assistant/mcp"
-	"dkst-terminal-assistant/terminal"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -84,7 +84,7 @@ func appTabSwitchIndex(keys []string) (int, bool) {
 		return 9, true
 	}
 
-	return int(digit[0]-'1'), true
+	return int(digit[0] - '1'), true
 }
 
 func ctrlByteForToken(token string) (byte, bool) {
@@ -231,15 +231,15 @@ func stripANSIEscapeCodes(value string) string {
 
 // App struct
 type App struct {
-	ctx                context.Context
-	terminals          map[string]*terminal.Terminal
-	activeTabId        string
-	mcpPort            int
-	mcpLabel           string
-	mcpServer          *MCPServer
-	lastCommandCursor  map[string]int
-	mu                 sync.Mutex
-	cancelFunc         context.CancelFunc
+	ctx               context.Context
+	terminals         map[string]*terminal.Terminal
+	activeTabId       string
+	mcpPort           int
+	mcpLabel          string
+	mcpServer         *MCPServer
+	lastCommandCursor map[string]int
+	mu                sync.Mutex
+	cancelFunc        context.CancelFunc
 }
 
 // NewApp creates a new App application struct
@@ -405,8 +405,12 @@ func (a *App) ReadActiveTerminalTail(lines int, maxWaitMs int, idleMs int) (stri
 	}
 
 	deadline := time.Now().Add(time.Duration(maxWaitMs) * time.Millisecond)
+	sawNewOutput := term.HasOutputSince(cursor)
 	for maxWaitMs > 0 {
-		if term.TimeSinceLastOutput() >= time.Duration(idleMs)*time.Millisecond {
+		if !sawNewOutput {
+			sawNewOutput = term.HasOutputSince(cursor)
+		}
+		if sawNewOutput && term.TimeSinceLastOutput() >= time.Duration(idleMs)*time.Millisecond {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -427,7 +431,7 @@ func (a *App) ReadActiveTerminalTail(lines int, maxWaitMs int, idleMs int) (stri
 func (a *App) UpdateMCPSettings(port int, label string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	
+
 	if a.mcpPort != port || a.mcpServer == nil {
 		if port > 0 {
 			if a.mcpServer != nil {
@@ -439,14 +443,14 @@ func (a *App) UpdateMCPSettings(port int, label string) {
 		}
 	}
 	a.mcpLabel = label
-    log.Printf("[App] MCP Settings updated: Port=%d, Label=%s", port, label)
+	log.Printf("[App] MCP Settings updated: Port=%d, Label=%s", port, label)
 }
 
 func (a *App) handleMCPServerStart() {
-    if a.mcpPort > 0 && a.mcpServer == nil {
-        a.mcpServer = NewMCPServer(a)
-        a.mcpServer.Start(a.mcpPort)
-    }
+	if a.mcpPort > 0 && a.mcpServer == nil {
+		a.mcpServer = NewMCPServer(a)
+		a.mcpServer.Start(a.mcpPort)
+	}
 }
 
 // GetTools returns the list of available MCP tools
@@ -622,7 +626,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 					} `json:"delta"`
 				} `json:"choices"`
 			}
-			
+
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				log.Printf("[LLM] JSON Parse Error: %v | Data: %s", err, data)
 				continue

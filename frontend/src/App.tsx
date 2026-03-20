@@ -1445,7 +1445,8 @@ ${trimmedGlobalUserPrompt}
    >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
    To call any other MCP tool such as search_web, read_web_page, get_current_time, naver_search, or namu_wiki, YOU MUST output this EXACT format:
    [TOOL: tool_name {"arg":"value"}]
-   
+   Only use tools that are explicitly listed as available. Never invent tool names such as create_file, write_file, save_file, or edit_file.
+    
 Example: To check the home folder, output:
 >>> EXECUTE_COMMAND: "cd ~ && ls" <<<
 Example: To exit vim without saving, output:
@@ -1454,11 +1455,14 @@ Example: To search the web, output:
 [TOOL: search_web {"query":"Apple M4 Pro GPU benchmark"}]
 Example: To read a page, output:
 [TOOL: read_web_page {"url":"https://example.com"}]
+Example: To create a text file on Windows, output:
+>>> EXECUTE_COMMAND: "Set-Content -Path 'note.txt' -Value 'hello'" <<<
 
 ALWAYS use the tool when the user asks for terminal actions.
 If the user asks for latest web information, website verification, or online reading, use search_web and read_web_page instead of saying web browsing is unavailable.
 If the user asks to count files, inspect directories, verify paths, read files, or confirm system state, use terminal commands even if something similar is visible in SCREEN_CONTEXT.
 When Current OS indicates Windows, assume the terminal shell is PowerShell. Use PowerShell syntax only. Do not use cmd.exe or batch syntax such as \`if exist\`, \`dir /b\`, \`copy\`, \`del\`, \`type\`, \`set VAR=\`, or \`%VAR%\`.
+If the user asks to create, overwrite, append, rename, move, or delete files on Windows, do it with PowerShell commands through EXECUTE_COMMAND, not with a file tool.
 4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.${buildTaskWorkflowPrompt(complexRequest)}
 Current OS: ${window.navigator.platform}
 Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserPromptSection}`;
@@ -1507,9 +1511,26 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     const windowsCmdSyntaxError = toolName === 'execute_command' && window.navigator.platform.toLowerCase().includes('win')
                         ? detectWindowsCmdSyntax(commandText)
                         : null;
+                    const toolIsAvailable = activeTools.some(tool => tool.name === toolName);
 
                     // Filter out the tool call from the response to prevent loops and show only final text
                     response = response.replace(raw, '').trim();
+
+                    if (!toolIsAvailable) {
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            toolArgs,
+                            `Error: tool not available: ${toolName}. Use one of the explicitly available tools. For file creation on Windows, use EXECUTE_COMMAND with PowerShell such as Set-Content or Out-File.`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                        );
+                        setIsThinking(false);
+                        continue;
+                    }
 
                     if (windowsCmdSyntaxError) {
                         commandIntercepted = true;

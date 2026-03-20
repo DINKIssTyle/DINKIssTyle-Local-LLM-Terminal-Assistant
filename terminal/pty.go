@@ -1,6 +1,6 @@
 /*
-    Created by DINKIssTyle on 2026.
-    Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
+   Created by DINKIssTyle on 2026.
+   Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 */
 
 package terminal
@@ -38,8 +38,10 @@ func NewTerminal(onData func(data string)) *Terminal {
 
 func (t *Terminal) Start() error {
 	var shell string
+	var shellArgs []string
 	if runtime.GOOS == "windows" {
 		shell = "powershell.exe"
+		shellArgs = []string{"-NoLogo", "-NoProfile"}
 	} else {
 		shell = os.Getenv("SHELL")
 		if shell == "" {
@@ -52,7 +54,7 @@ func (t *Terminal) Start() error {
 		return err
 	}
 
-	c := p.Command(shell)
+	c := p.Command(shell, shellArgs...)
 	c.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	if err := c.Start(); err != nil {
@@ -136,6 +138,17 @@ func (t *Terminal) OutputCursor() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.outputTail)
+}
+
+func (t *Terminal) HasOutputSince(cursor int) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if cursor < 0 {
+		cursor = 0
+	}
+
+	return len(t.outputTail) > cursor
 }
 
 func (t *Terminal) TailLinesSince(lines int, cursor int) string {
