@@ -55,7 +55,12 @@ func (t *Terminal) Start() error {
 	}
 
 	c := p.Command(shell, shellArgs...)
-	c.Env = append(os.Environ(), "TERM=xterm-256color")
+	c.Env = append(
+		os.Environ(),
+		"TERM=xterm-256color",
+		"LANG=en_US.UTF-8",
+		"LC_CTYPE=en_US.UTF-8",
+	)
 
 	if err := c.Start(); err != nil {
 		p.Close()
