@@ -591,7 +591,13 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
 const isAppNewTabShortcut = (keys: string[]): boolean => {
     const normalized = normalizeShortcutTokens(keys);
     const hasModifier = normalized.includes('CTRL') || normalized.includes('CONTROL') || normalized.includes('CMD') || normalized.includes('COMMAND') || normalized.includes('META');
-    return hasModifier && normalized.includes('SHIFT') && normalized.includes('T');
+    return hasModifier && normalized.includes('T');
+};
+
+const isAppCloseTabShortcut = (keys: string[]): boolean => {
+    const normalized = normalizeShortcutTokens(keys);
+    const hasModifier = normalized.includes('CTRL') || normalized.includes('CONTROL') || normalized.includes('CMD') || normalized.includes('COMMAND') || normalized.includes('META');
+    return hasModifier && normalized.includes('W');
 };
 
 const LLMProgressCard = ({ progress }: { progress: LLMProgressState | null }) => {
@@ -658,6 +664,14 @@ const isComplexRequest = (request: string): boolean => {
         + (normalized.match(/그리고|다음|이후|전에|및|해서|해서도|하면서/g) || []).length;
 
     return normalized.length >= 140 || keywordHits >= 2 || sentenceCount >= 3 || conjunctionHits >= 2;
+};
+
+const SCREEN_CONTEXT_KEYWORDS = /화면|스크린|보이는|visible|ui|layout|버튼|입력창|chat|대화|terminal|터미널|prompt|프롬프트|nano|pico|vim|editor|편집기|pane|패널/i;
+
+const clampText = (value: string, maxLength: number): string => {
+    const normalized = value.trim();
+    if (normalized.length <= maxLength) return normalized;
+    return `${normalized.slice(0, maxLength).trimEnd()}...`;
 };
 
 const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
@@ -926,6 +940,7 @@ ${t('greeting')}`
     const messagesRef = useRef<Message[]>(messages);
     const currentThinkingRef = useRef('');
     const requestSequenceRef = useRef(0);
+    const llmProgressHideTimeoutRef = useRef<number | null>(null);
 
     const getNextTabName = (existingTabs: Tab[]): string => {
         const usedNumbers = new Set(
@@ -1027,6 +1042,12 @@ ${t('greeting')}`
                 return;
             }
 
+            if (isAppCloseTabShortcut(normalizedKeys)) {
+                event.preventDefault();
+                confirmAndCloseActiveTab();
+                return;
+            }
+
             const tabIndex = getAppTabSwitchIndex(normalizedKeys);
             if (tabIndex !== null) {
                 event.preventDefault();
@@ -1068,20 +1089,39 @@ ${t('greeting')}`
 
         const unoffProgress = EventsOn("llm:status", (payload: any) => {
             if (!payload?.active) {
+                if (llmProgressHideTimeoutRef.current !== null) {
+                    window.clearTimeout(llmProgressHideTimeoutRef.current);
+                    llmProgressHideTimeoutRef.current = null;
+                }
                 setLlmProgress(null);
                 return;
             }
 
-            const phase = payload.phase === 'model-load' ? 'model-load' : 'prompt-processing';
-            setLlmProgress({
+            const phase: LLMProgressState['phase'] = payload.phase === 'model-load' ? 'model-load' : 'prompt-processing';
+            const nextProgress: LLMProgressState = {
                 phase,
                 label: payload.label || (phase === 'model-load' ? 'Loading Model...' : 'Processing Prompt...'),
                 percent: Number(payload.percent || 0),
                 active: true,
-            });
+            };
+            setLlmProgress(nextProgress);
+
+            if (nextProgress.percent >= 100) {
+                if (llmProgressHideTimeoutRef.current !== null) {
+                    window.clearTimeout(llmProgressHideTimeoutRef.current);
+                }
+                llmProgressHideTimeoutRef.current = window.setTimeout(() => {
+                    setLlmProgress(null);
+                    llmProgressHideTimeoutRef.current = null;
+                }, 700);
+            }
         });
 
         return () => {
+            if (llmProgressHideTimeoutRef.current !== null) {
+                window.clearTimeout(llmProgressHideTimeoutRef.current);
+                llmProgressHideTimeoutRef.current = null;
+            }
             unoffChunk();
             unoffThinking();
             unoffProgress();
@@ -1200,8 +1240,7 @@ ${t('greeting')}`
         openNewTab();
     };
 
-    const removeTab = (e: React.MouseEvent, id: string) => {
-        e.stopPropagation();
+    const removeTabById = (id: string) => {
         if (tabs.length === 1) return;
         const term = xtermsRef.current[id];
         if (term) {
@@ -1215,6 +1254,19 @@ ${t('greeting')}`
         const newTabs = tabs.filter(t => t.id !== id);
         setTabs(newTabs);
         if (activeTabId === id) setActiveTabId(newTabs[newTabs.length - 1].id);
+    };
+
+    const removeTab = (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        removeTabById(id);
+    };
+
+    const confirmAndCloseActiveTab = () => {
+        if (tabs.length === 1) return;
+        const activeTab = tabs.find(tab => tab.id === activeTabId);
+        const shouldClose = window.confirm(`${activeTab?.name || '현재 탭'}을(를) 닫을까요?`);
+        if (!shouldClose) return;
+        removeTabById(activeTabId);
     };
 
     const getVisibleTerminalText = (): string => {
@@ -1239,18 +1291,28 @@ ${t('greeting')}`
         return lines.join('\n') || 'Terminal viewport is currently empty.';
     };
 
+    const getCondensedVisibleTerminalText = (): string => {
+        const visible = getVisibleTerminalText();
+        return clampText(visible, 1200);
+    };
+
+    const shouldIncludeScreenContext = (history: Message[]): boolean => {
+        const latestUserRequest = getLatestUserRequest(history);
+        return SCREEN_CONTEXT_KEYWORDS.test(latestUserRequest);
+    };
+
     const buildScreenContext = (history: Message[]): string => {
         const activeTab = tabs.find(tab => tab.id === activeTabId);
-        const visibleChat = history.slice(-6).map(message => {
+        const visibleChat = history.slice(-4).map(message => {
             const roleLabel = message.role === 'user' ? 'User' : message.role === 'assistant' ? 'Assistant' : message.role;
-            return `${roleLabel}: ${stripMarkupForContext(message.content).slice(0, 500) || '(empty)'}`;
+            return `${roleLabel}: ${clampText(stripMarkupForContext(message.content) || '(empty)', 240)}`;
         }).join('\n');
 
         return [
             `ACTIVE_TAB: ${activeTab?.name || activeTabId}`,
             `CHAT_WIDTH: ${chatWidth}px`,
             'VISIBLE_TERMINAL:',
-            getVisibleTerminalText(),
+            getCondensedVisibleTerminalText(),
             'VISIBLE_CHAT:',
             visibleChat || 'No visible chat messages.',
         ].join('\n');
@@ -1322,12 +1384,63 @@ ${t('greeting')}`
         return { status: 'allow' };
     };
 
-    const buildLLMMessages = (history: Message[], baseSystemPrompt: string) => {
-        const screenContext = buildScreenContext(history);
+    const buildLLMMessages = (
+        history: Message[],
+        baseSystemPrompt: string,
+        options?: { includeScreenContext?: boolean }
+    ) => {
+        const includeScreenContext = options?.includeScreenContext ?? false;
+        const systemContent = includeScreenContext
+            ? `${baseSystemPrompt}\n\nSCREEN_CONTEXT:\n${buildScreenContext(history)}`
+            : baseSystemPrompt;
         return [{
             role: 'system',
-            content: `${baseSystemPrompt}\n\nSCREEN_CONTEXT:\n${screenContext}`
+            content: systemContent,
         }, ...history];
+    };
+
+    const summarizeToolResultForHistory = (toolName: string, result: string): string => {
+        const trimmed = result.trim();
+        if (!trimmed) return '(empty result)';
+
+        switch (toolName) {
+            case 'execute_command':
+                return clampText(trimmed, 160);
+            case 'send_keys':
+                return clampText(trimmed, 160);
+            case 'read_terminal_tail':
+                return `[terminal tail]\n${clampText(trimmed, 700)}`;
+            case 'search_web':
+            case 'read_web_page':
+            case 'naver_search':
+            case 'namu_wiki':
+                return clampText(trimmed, 900);
+            default:
+                return clampText(trimmed, 400);
+        }
+    };
+
+    const normalizeCommandForTerminal = (command: string): string => {
+        let normalized = command.trim();
+        if (!normalized) return normalized;
+
+        if (normalized.includes('<<') && normalized.includes('\\n') && !normalized.includes('\n')) {
+            normalized = normalized.replace(/\\n/g, '\n');
+        }
+
+        return normalized;
+    };
+
+    const executeCommandLocally = async (commandText: string): Promise<string> => {
+        const normalized = normalizeCommandForTerminal(commandText);
+        if (!normalized) {
+            throw new Error('command cannot be empty');
+        }
+
+        const activeTerm = xtermsRef.current[activeTabId];
+        activeTerm?.focus();
+        await WriteToTerminal(activeTabId, `${normalized}\r`);
+        return `Sent to terminal: ${normalized}`;
     };
 
     const continueAfterToolExecution = async (
@@ -1345,7 +1458,7 @@ ${t('greeting')}`
             nextResponse = stripToolCallMarkup(responseSansCommand);
         }
 
-        const llmMessages = buildLLMMessages(historyToSend, baseSystemPrompt);
+        const llmMessages = buildLLMMessages(historyToSend, baseSystemPrompt, { includeScreenContext: false });
         nextResponse = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
         return nextResponse;
     };
@@ -1357,7 +1470,8 @@ ${t('greeting')}`
         result: string,
     ) => {
         const toolRole: 'tool' | 'user' = (provider === 'OpenAI') ? 'tool' : 'user';
-        const toolContent = (toolRole === 'user') ? `[Tool Response from ${toolName}]: ${result}` : result;
+        const summarizedResult = summarizeToolResultForHistory(toolName, result);
+        const toolContent = (toolRole === 'user') ? `[Tool Response from ${toolName}]: ${summarizedResult}` : summarizedResult;
         const toolResultMsg: Message = { role: toolRole, content: toolContent, name: toolName };
 
         history.push({ role: 'assistant', content: `[TOOL: ${toolName} ${toolArgs}]` });
@@ -1445,8 +1559,61 @@ ${t('greeting')}`
             },
         ];
 
-        const llmMessages = buildLLMMessages(terminalContext, analysisPrompt);
+        const llmMessages = buildLLMMessages(terminalContext, analysisPrompt, { includeScreenContext: true });
         return FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
+    };
+
+    const callToolWithClientTimeout = async (
+        toolName: string,
+        toolArgs: string,
+        fallbackResult?: string,
+    ): Promise<{ result: string; timedOut: boolean }> => {
+        if (toolName === 'execute_command') {
+            const parsedArgs = JSON.parse(toolArgs);
+            return {
+                result: await executeCommandLocally(parsedArgs.command),
+                timedOut: false,
+            };
+        }
+
+        const timeoutMs = (toolName === 'send_keys')
+            ? 2500
+            : toolName === 'read_terminal_tail'
+                ? 1800
+                : 8000;
+
+        let timeoutHandle: number | null = null;
+        try {
+            const parsedArgs = JSON.parse(toolArgs);
+            const result = await Promise.race([
+                (toolName === 'send_keys'
+                        ? (async () => handleAppLevelSendKeys(parsedArgs.keys) ?? CallTool(toolName, toolArgs))()
+                        : CallTool(toolName, toolArgs)
+                ),
+                new Promise<string>((resolve) => {
+                    timeoutHandle = window.setTimeout(() => {
+                        if (fallbackResult) {
+                            resolve(fallbackResult);
+                        } else if (toolName === 'send_keys') {
+                            resolve('Keys sent to terminal (client timeout while waiting for MCP acknowledgement).');
+                        } else if (toolName === 'read_terminal_tail') {
+                            resolve('(terminal tail unavailable: client timeout while waiting for MCP acknowledgement)');
+                        } else {
+                            resolve('Tool completed, but the client timed out while waiting for the result.');
+                        }
+                    }, timeoutMs);
+                }),
+            ]);
+
+            return {
+                result,
+                timedOut: result.includes('client timeout while waiting for MCP acknowledgement'),
+            };
+        } finally {
+            if (timeoutHandle !== null) {
+                window.clearTimeout(timeoutHandle);
+            }
+        }
     };
 
     const shouldContinueAfterToolExecution = (toolName: string) => {
@@ -1455,19 +1622,19 @@ ${t('greeting')}`
 
     const buildTerminalToolSummary = (toolName: string, commandText: string, responseSansCommand: string) => {
         const cleaned = stripToolCallMarkup(responseSansCommand);
-        if (cleaned) {
-            return cleaned;
-        }
-
         if (toolName === 'execute_command') {
             if (isInteractiveTerminalLaunch(commandText)) {
-                return `\`${commandText}\` 명령을 실행했고 인터랙티브 프로그램이 열렸습니다. 왼쪽 터미널에서 이어서 확인할 수 있습니다.`;
+                return `\`${commandText}\` 명령을 실행했고 인터랙티브 프로그램이 열렸습니다. 왼쪽 터미널에서 바로 확인할 수 있습니다.`;
             }
             return `\`${commandText}\` 명령을 터미널로 보냈습니다. 결과는 왼쪽 터미널에서 확인하세요.`;
         }
 
         if (toolName === 'send_keys') {
             return '터미널에 키 입력을 전송했습니다.';
+        }
+
+        if (cleaned) {
+            return cleaned;
         }
 
         return `\`${toolName}\` 도구를 실행했습니다.`;
@@ -1488,8 +1655,12 @@ ${t('greeting')}`
             return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
         }
 
-        const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 4000, idleMs: 1200 });
-        const tail = await CallTool('read_terminal_tail', tailArgs);
+        const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 2500, idleMs: 900 });
+        const { result: tail } = await callToolWithClientTimeout(
+            'read_terminal_tail',
+            tailArgs,
+            '(terminal tail unavailable: client timeout while waiting for MCP acknowledgement)',
+        );
         const visibleTerminal = getVisibleTerminalText();
         const combinedTerminal = `${visibleTerminal}\n${tail}`;
         const promptRecovered = hasRecoveredShellPrompt(visibleTerminal) || hasRecoveredShellPrompt(tail);
@@ -1511,6 +1682,10 @@ ${t('greeting')}`
         const blocker = detectTerminalBlockerState(combinedTerminal);
         if (blocker) {
             return `작업이 아직 진행 중이거나 완료 여부가 불분명합니다. ${blocker}`;
+        }
+
+        if (tail.includes('terminal tail unavailable')) {
+            return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
         }
 
         return summarizeTerminalTail(getLatestUserRequest(historyToSend), commandText, tail, [...historyToSend], baseSystemPrompt);
@@ -1652,11 +1827,11 @@ ${t('greeting')}`
         setCurrentThinking('');
 
         try {
-            const result = await CallTool(request.toolName, request.toolArgs);
+            const { result, timedOut } = await callToolWithClientTimeout(request.toolName, request.toolArgs);
             setMessages(prev => [...prev, {
                 role: 'tool',
                 name: request.toolName,
-                content: `Command: \`${request.command}\`\n\nStatus: ${result}`
+                content: `Command: \`${request.command}\`${timedOut ? '\n\nNote: MCP 응답이 늦어 클라이언트 타임아웃으로 진행했습니다.' : ''}\n\nStatus: ${result}`
             }]);
 
             let response = buildTerminalToolSummary('execute_command', request.command, request.responseSansCommand);
@@ -1789,8 +1964,10 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             });
             const loopHistory = [...historyToSend];
 
-            let currentMessages: any[] = buildLLMMessages(loopHistory, baseSystemPrompt);
-            console.log("[LLM] Sending Payload:", JSON.stringify(currentMessages, null, 2));
+            let currentMessages: any[] = buildLLMMessages(loopHistory, baseSystemPrompt, {
+                includeScreenContext: shouldIncludeScreenContext(loopHistory),
+            });
+            console.log(`[LLM] Sending ${currentMessages.length} messages (screen context: ${shouldIncludeScreenContext(loopHistory) ? 'on' : 'off'})`);
             let response = '';
             let commandIntercepted = false;
             setCurrentThinking('');
@@ -1844,7 +2021,9 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     temperature,
                     provider,
                     true,
-                    buildLLMMessages(continuationHistory, baseSystemPrompt),
+                    buildLLMMessages(continuationHistory, baseSystemPrompt, {
+                        includeScreenContext: shouldIncludeScreenContext(continuationHistory),
+                    }),
                 );
                 if (!isCurrentRequest()) return;
                 setIsThinking(false);
@@ -1966,15 +2145,13 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     });
 
                     try {
-                        const result = toolName === 'send_keys'
-                            ? (handleAppLevelSendKeys(effectiveParsedKeys) ?? await CallTool(toolName, effectiveToolArgs))
-                            : await CallTool(toolName, effectiveToolArgs);
+                        const { result, timedOut } = await callToolWithClientTimeout(toolName, effectiveToolArgs);
                         if (!isCurrentRequest()) return;
                         console.log(`[MCP] Tool ${toolName} result:`, result);
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
-                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${effectiveCommandText}\`${normalizedSendKeys?.reason ? `\n\nRemap: ${normalizedSendKeys.reason}` : ''}\n\nStatus: ${result}`
+                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${effectiveCommandText}\`${normalizedSendKeys?.reason ? `\n\nRemap: ${normalizedSendKeys.reason}` : ''}${timedOut ? '\n\nNote: MCP 응답이 늦어 클라이언트 타임아웃으로 진행했습니다.' : ''}\n\nStatus: ${result}`
                         };
                         setMessages(prev => {
                             const next = [...prev, toolResultForUi];
@@ -2079,16 +2256,30 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
         }
     };
 
-    const handleStop = async () => {
-        requestSequenceRef.current += 1;
-        await StopLLMResponse();
+    const resetInFlightUiState = () => {
+        setPendingApproval(null);
         setIsLoading(false);
         setIsThinking(false);
         setLlmProgress(null);
+        setCurrentThinking('');
+        currentThinkingRef.current = '';
+        if (llmProgressHideTimeoutRef.current !== null) {
+            window.clearTimeout(llmProgressHideTimeoutRef.current);
+            llmProgressHideTimeoutRef.current = null;
+        }
     };
 
-    const clearMessages = () => {
-        setMessages([{
+    const handleStop = async () => {
+        requestSequenceRef.current += 1;
+        await StopLLMResponse();
+        resetInFlightUiState();
+    };
+
+    const clearMessages = async () => {
+        requestSequenceRef.current += 1;
+        await StopLLMResponse();
+        resetInFlightUiState();
+        const nextMessages: Message[] = [{
             role: 'assistant',
             content: `<analysis>System Lifecycle: Reset Success</analysis>
 <progress title="DKST Terminal Assistant: New Session" description="System is ready for your next request.">
@@ -2096,7 +2287,9 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
 2. Memory buffer released
 </progress>
 대화 기록이 초기화되었습니다. 무엇을 도와드릴까요?`
-        }]);
+        }];
+        messagesRef.current = nextMessages;
+        setMessages(nextMessages);
     };
 
     useEffect(() => {
@@ -2130,7 +2323,15 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     </div>
                     <div className="terminal-container-wrapper">
                         {tabs.map(tab => (
-                            <div key={tab.id} className={`terminal-container ${activeTabId === tab.id ? 'active' : ''}`} ref={el => terminalContainersRef.current[tab.id] = el}></div>
+                            <div
+                                key={tab.id}
+                                className={`terminal-container ${activeTabId === tab.id ? 'active' : ''}`}
+                                ref={el => terminalContainersRef.current[tab.id] = el}
+                                onMouseDown={() => {
+                                    setActiveTabId(tab.id);
+                                    xtermsRef.current[tab.id]?.focus();
+                                }}
+                            ></div>
                         ))}
                     </div>
                 </div>
