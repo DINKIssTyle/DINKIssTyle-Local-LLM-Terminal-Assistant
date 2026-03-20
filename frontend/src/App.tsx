@@ -779,9 +779,27 @@ function App() {
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [isFetchingModels, setIsFetchingModels] = useState(false);
 
+    const getNextTabName = (existingTabs: Tab[]): string => {
+        const usedNumbers = new Set(
+            existingTabs
+                .map(tab => {
+                    const match = tab.name.match(/^Tab\s+(\d+)$/i);
+                    return match ? Number(match[1]) : null;
+                })
+                .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0)
+        );
+
+        let nextNumber = 1;
+        while (usedNumbers.has(nextNumber)) {
+            nextNumber += 1;
+        }
+
+        return `Tab ${nextNumber}`;
+    };
+
     const openNewTab = () => {
         const newId = String(Date.now());
-        setTabs(prev => [...prev, { id: newId, name: `Tab ${prev.length + 1}` }]);
+        setTabs(prev => [...prev, { id: newId, name: getNextTabName(prev) }]);
         setActiveTabId(newId);
     };
 
