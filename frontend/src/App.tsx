@@ -537,15 +537,17 @@ const isAppNewTabShortcut = (keys: string[]): boolean => {
 
 const LLMProgressCard = ({ progress }: { progress: LLMProgressState | null }) => {
     if (!progress?.active) return null;
+    const normalizedPercent = Math.max(0, Math.min(100, progress.percent));
+    const isIndeterminate = normalizedPercent <= 0;
 
     return (
-        <div className={`llm-progress-card ${progress.phase}`}>
+        <div className={`llm-progress-card ${progress.phase} ${isIndeterminate ? 'indeterminate' : ''}`}>
             <div className="llm-progress-text">
                 <span className="llm-progress-label">{progress.label}</span>
-                <span className="llm-progress-percent">{Math.max(0, Math.min(100, Math.round(progress.percent)))}%</span>
+                <span className="llm-progress-percent">{isIndeterminate ? '...' : `${Math.round(normalizedPercent)}%`}</span>
             </div>
             <div className="llm-progress-track">
-                <div className="llm-progress-fill" style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }}></div>
+                <div className="llm-progress-fill" style={{ width: isIndeterminate ? '34%' : `${normalizedPercent}%` }}></div>
             </div>
         </div>
     );
@@ -622,6 +624,15 @@ const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
    </report>
 7. COMPLEX TASK BEHAVIOR: Do not only propose a plan. Actually carry out the work, keep the task list aligned with the work performed, and finish with a completion report.`;
 };
+
+const stripToolCallMarkup = (value: string): string => (
+    value
+        .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/g, '')
+        .replace(/>>>\s*EXECUTE_COMMAND:\s*"[\s\S]*?"\s*<<</g, '')
+        .replace(/>>>\s*SEND_KEYS:\s*\[[\s\S]*?\]\s*<<</g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+);
 
 const detectWindowsCmdSyntax = (command: string): string | null => {
     const normalized = command.trim().toLowerCase();
@@ -795,6 +806,9 @@ ${t('greeting')}`
     const [llmProgress, setLlmProgress] = useState<LLMProgressState | null>(null);
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [isFetchingModels, setIsFetchingModels] = useState(false);
+    const messagesRef = useRef<Message[]>(messages);
+    const currentThinkingRef = useRef('');
+    const requestSequenceRef = useRef(0);
 
     const getNextTabName = (existingTabs: Tab[]): string => {
         const usedNumbers = new Set(
@@ -960,6 +974,14 @@ ${t('greeting')}`
     const scrollToBottom = () => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
+
+    useEffect(() => {
+        messagesRef.current = messages;
+    }, [messages]);
+
+    useEffect(() => {
+        currentThinkingRef.current = currentThinking;
+    }, [currentThinking]);
 
     const scheduleTerminalFit = (tabId: string) => {
         const runFit = () => {
@@ -1203,7 +1225,7 @@ ${t('greeting')}`
 
         let nextResponse = '';
         if (responseSansCommand) {
-            nextResponse = responseSansCommand;
+            nextResponse = stripToolCallMarkup(responseSansCommand);
         }
 
         const llmMessages = buildLLMMessages(historyToSend, baseSystemPrompt);
@@ -1264,8 +1286,9 @@ ${t('greeting')}`
     };
 
     const buildTerminalToolSummary = (toolName: string, commandText: string, responseSansCommand: string) => {
-        if (responseSansCommand) {
-            return responseSansCommand;
+        const cleaned = stripToolCallMarkup(responseSansCommand);
+        if (cleaned) {
+            return cleaned;
         }
 
         if (toolName === 'execute_command') {
@@ -1302,8 +1325,23 @@ ${t('greeting')}`
             if (last?.role === 'assistant') {
                 return prev;
             }
-            return [...prev, { role: 'assistant', content: '', reasoning: '' }];
+            const next: Message[] = [...prev, { role: 'assistant', content: '', reasoning: '' }];
+            messagesRef.current = next;
+            return next;
         });
+    };
+
+    const sanitizeHistoryForNewTurn = (history: Message[]): Message[] => {
+        const cleaned = [...history];
+        while (cleaned.length > 0) {
+            const last = cleaned[cleaned.length - 1];
+            if (last.role === 'assistant' && !last.content.trim() && !(last.reasoning || '').trim()) {
+                cleaned.pop();
+                continue;
+            }
+            break;
+        }
+        return cleaned;
     };
 
     const handleAppLevelSendKeys = (keys: string[]): string | null => {
@@ -1410,21 +1448,40 @@ ${t('greeting')}`
     };
 
     const sendMessage = async () => {
-        if (!inputText.trim() || isLoading) return;
+        const trimmedInput = inputText.trim();
+        if (!trimmedInput) return;
 
-        console.log("Sending message...", inputText);
-        const userMessage: Message = { role: 'user', content: inputText };
-        const newMessages = [...messages, userMessage];
+        const requestId = ++requestSequenceRef.current;
+        const isCurrentRequest = () => requestSequenceRef.current === requestId;
+
+        if (isLoading) {
+            await StopLLMResponse();
+            if (!isCurrentRequest()) return;
+        }
+
+        console.log("Sending message...", trimmedInput);
+        const userMessage: Message = { role: 'user', content: trimmedInput };
+        const baseHistory = sanitizeHistoryForNewTurn(messagesRef.current);
+        const newMessages = [...baseHistory, userMessage];
         setMessages(newMessages);
+        messagesRef.current = newMessages;
         setInputText('');
         setIsLoading(true);
         setCurrentThinking('');
+        currentThinkingRef.current = '';
+        setIsThinking(false);
+        setLlmProgress({
+            phase: 'prompt-processing',
+            label: 'Processing Prompt...',
+            percent: 0,
+            active: true,
+        });
 
         try {
             const activeTools = availableTools.filter(t => enabledTools.includes(t.name));
             console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} tools enabled.`);
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
-            const complexRequest = isComplexRequest(inputText);
+            const complexRequest = isComplexRequest(trimmedInput);
             const trimmedGlobalUserPrompt = globalUserPrompt.trim();
             const globalUserPromptSection = trimmedGlobalUserPrompt
                 ? `
@@ -1451,6 +1508,8 @@ Example: To check the home folder, output:
 >>> EXECUTE_COMMAND: "cd ~ && ls" <<<
 Example: To exit vim without saving, output:
 >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
+Example: If ESC or normal quit keys do not return terminal control, output:
+>>> SEND_KEYS: ["CTRL_C"] <<<
 Example: To search the web, output:
 [TOOL: search_web {"query":"Apple M4 Pro GPU benchmark"}]
 Example: To read a page, output:
@@ -1461,6 +1520,7 @@ Example: To create a text file on Windows, output:
 ALWAYS use the tool when the user asks for terminal actions.
 If the user asks for latest web information, website verification, or online reading, use search_web and read_web_page instead of saying web browsing is unavailable.
 If the user asks to count files, inspect directories, verify paths, read files, or confirm system state, use terminal commands even if something similar is visible in SCREEN_CONTEXT.
+If terminal control appears stuck inside an interactive program and ESC, :q, exit, or other normal quit sequences do not restore the shell prompt, send CTRL_C to interrupt the program and recover the terminal prompt. This also applies on macOS terminals: use CTRL_C, not CMD_C.
 When Current OS indicates Windows, assume the terminal shell is PowerShell. Use PowerShell syntax only. Do not use cmd.exe or batch syntax such as \`if exist\`, \`dir /b\`, \`copy\`, \`del\`, \`type\`, \`set VAR=\`, or \`%VAR%\`.
 If the user asks to create, overwrite, append, rename, move, or delete files on Windows, do it with PowerShell commands through EXECUTE_COMMAND, not with a file tool.
 4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.${buildTaskWorkflowPrompt(complexRequest)}
@@ -1478,26 +1538,37 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             let response = '';
             let commandIntercepted = false;
             setCurrentThinking('');
+            currentThinkingRef.current = '';
             setIsThinking(true);
 
             // Initialize assistant message for streaming
-            setMessages(prev => [...prev, { role: 'assistant', content: '', reasoning: '' }]);
+            setMessages(prev => {
+                const next: Message[] = [...prev, { role: 'assistant', content: '', reasoning: '' }];
+                messagesRef.current = next;
+                return next;
+            });
 
             try {
                 // Call StopLLMResponse safely
                 if ((window as any).go?.main?.App?.StopLLMResponse) {
                     await (window as any).go.main.App.StopLLMResponse();
+                    if (!isCurrentRequest()) return;
                 }
 
                 response = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, currentMessages);
+                if (!isCurrentRequest()) return;
             } catch (err) {
+                if (!isCurrentRequest()) return;
                 throw err;
             } finally {
-                setIsThinking(false);
+                if (isCurrentRequest()) {
+                    setIsThinking(false);
+                }
             }
 
             let toolLoopCount = 0;
             while (true) {
+                if (!isCurrentRequest()) return;
                 toolLoopCount += 1;
                 if (toolLoopCount > 8) {
                     response = `${response ? `${response}\n\n` : ''}작업이 여러 단계로 계속 이어지고 있어 여기서 중단했습니다. 다음 단계가 더 필요하면 이어서 진행하겠습니다.`;
@@ -1514,11 +1585,12 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     const toolIsAvailable = activeTools.some(tool => tool.name === toolName);
 
                     // Filter out the tool call from the response to prevent loops and show only final text
-                    response = response.replace(raw, '').trim();
+                    response = stripToolCallMarkup(response.replace(raw, '').trim());
 
                     if (!toolIsAvailable) {
                         ensureAssistantPlaceholder();
                         setCurrentThinking('');
+                        currentThinkingRef.current = '';
                         setIsThinking(true);
                         response = await continueAfterToolExecution(
                             toolName,
@@ -1528,31 +1600,40 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             baseSystemPrompt,
                             response,
                         );
+                        if (!isCurrentRequest()) return;
                         setIsThinking(false);
                         continue;
                     }
 
                     if (windowsCmdSyntaxError) {
                         commandIntercepted = true;
-                        setMessages(prev => [...prev, {
-                            role: 'system',
-                            content: `${response ? `${response}\n\n` : ''}Windows에서는 PowerShell 문법만 사용해야 합니다. ${windowsCmdSyntaxError}`,
-                        }]);
+                        setMessages(prev => {
+                            const next = [...prev, {
+                                role: 'system' as const,
+                                content: `${response ? `${response}\n\n` : ''}Windows에서는 PowerShell 문법만 사용해야 합니다. ${windowsCmdSyntaxError}`,
+                            }];
+                            messagesRef.current = next;
+                            return next;
+                        });
                         response = '';
                         break;
                     }
 
                     if (toolName === 'execute_command' && commandPolicy.status === 'blocked') {
                         commandIntercepted = true;
-                        setMessages(prev => [...prev, {
-                            role: 'system',
-                            content: response || '위험한 명령이 감지되어 실행되지 않았습니다.',
-                            commandRequest: {
-                                status: 'blocked',
-                                command: commandText,
-                                reason: commandPolicy.reason || '차단 규칙과 일치했습니다.',
-                            },
-                        }]);
+                        setMessages(prev => {
+                            const next = [...prev, {
+                                role: 'system' as const,
+                                content: response || '위험한 명령이 감지되어 실행되지 않았습니다.',
+                                commandRequest: {
+                                    status: 'blocked' as const,
+                                    command: commandText,
+                                    reason: commandPolicy.reason || '차단 규칙과 일치했습니다.',
+                                },
+                            }];
+                            messagesRef.current = next;
+                            return next;
+                        });
                         response = '';
                         break;
                     }
@@ -1567,36 +1648,56 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             baseSystemPrompt,
                             responseSansCommand: response,
                         });
-                        setMessages(prev => [...prev, {
-                            role: 'system',
-                            content: response || '이 명령은 실행 전에 사용자 승인이 필요합니다.',
-                            commandRequest: {
-                                status: 'approval',
-                                command: commandText,
-                                reason: commandPolicy.reason || '사용자 승인이 필요합니다.',
-                            },
-                        }]);
+                        setMessages(prev => {
+                            const next = [...prev, {
+                                role: 'system' as const,
+                                content: response || '이 명령은 실행 전에 사용자 승인이 필요합니다.',
+                                commandRequest: {
+                                    status: 'approval' as const,
+                                    command: commandText,
+                                    reason: commandPolicy.reason || '사용자 승인이 필요합니다.',
+                                },
+                            }];
+                            messagesRef.current = next;
+                            return next;
+                        });
                         response = '';
                         break;
                     }
 
-                    setMessages(prev => [...prev, { role: 'system', content: `🔧 Executing ${toolName}...` }]);
+                    setMessages(prev => {
+                        const next = [...prev, { role: 'system' as const, content: `🔧 Executing ${toolName}...` }];
+                        messagesRef.current = next;
+                        return next;
+                    });
 
                     try {
                         const result = toolName === 'send_keys'
                             ? (handleAppLevelSendKeys(parsedKeys) ?? await CallTool(toolName, toolArgs))
                             : await CallTool(toolName, toolArgs);
+                        if (!isCurrentRequest()) return;
                         console.log(`[MCP] Tool ${toolName} result:`, result);
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
                             content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${commandText}\`\n\nStatus: ${result}`
                         };
-                        setMessages(prev => [...prev, toolResultForUi]);
+                        setMessages(prev => {
+                            const next = [...prev, toolResultForUi];
+                            messagesRef.current = next;
+                            return next;
+                        });
                         if (shouldContinueAfterToolExecution(toolName)) {
                             ensureAssistantPlaceholder();
                             setCurrentThinking('');
+                            currentThinkingRef.current = '';
                             setIsThinking(true);
+                            setLlmProgress({
+                                phase: 'prompt-processing',
+                                label: 'Processing Prompt...',
+                                percent: 0,
+                                active: true,
+                            });
                             response = await continueAfterToolExecution(
                                 toolName,
                                 toolArgs,
@@ -1605,12 +1706,20 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                 baseSystemPrompt,
                                 response,
                             );
+                            if (!isCurrentRequest()) return;
                             setIsThinking(false);
                         } else {
                             appendToolResultToHistory(loopHistory, toolName, toolArgs, result);
                             ensureAssistantPlaceholder();
                             setCurrentThinking('');
+                            currentThinkingRef.current = '';
                             setIsThinking(true);
+                            setLlmProgress({
+                                phase: 'prompt-processing',
+                                label: 'Processing Prompt...',
+                                percent: 0,
+                                active: true,
+                            });
                             response = await inspectTerminalIfNeeded(
                                 toolName,
                                 commandText,
@@ -1618,9 +1727,11 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                 baseSystemPrompt,
                                 response,
                             );
+                            if (!isCurrentRequest()) return;
                             setIsThinking(false);
                         }
                     } catch (err) {
+                        if (!isCurrentRequest()) return;
                         response = `Error calling tool ${toolName}: ${err}`;
                         break;
                     }
@@ -1629,6 +1740,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 }
             }
 
+            if (!isCurrentRequest()) return;
             if (!response && !currentThinking && !commandIntercepted) {
                 response = "죄송합니다. 응답을 생성하지 못했습니다. 설정을 확인하거나 다시 시도해 주세요.";
             }
@@ -1640,6 +1752,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     if (last?.role === 'assistant' && !last.content) {
                         updated.pop();
                     }
+                    messagesRef.current = updated;
                     return updated;
                 });
                 return;
@@ -1649,24 +1762,35 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
                 if (last && last.role === 'assistant') {
-                    last.content = response;
-                    last.reasoning = currentThinking;
+                    last.content = stripToolCallMarkup(response);
+                    last.reasoning = currentThinkingRef.current;
                 }
+                messagesRef.current = updated;
                 return updated;
             });
         } catch (error: any) {
+            if (!isCurrentRequest()) return;
             console.error("[LLM] Error in sendMessage:", error);
-            setMessages(prev => [...prev, { role: 'system', content: `❌ LLM Request Failed: ${error.message || error}` }]);
+            setMessages(prev => {
+                const next = [...prev, { role: 'system' as const, content: `❌ LLM Request Failed: ${error.message || error}` }];
+                messagesRef.current = next;
+                return next;
+            });
         } finally {
-            setIsLoading(false);
-            setIsThinking(false);
+            if (isCurrentRequest()) {
+                setIsLoading(false);
+                setIsThinking(false);
+                setLlmProgress(null);
+            }
         }
     };
 
     const handleStop = async () => {
+        requestSequenceRef.current += 1;
         await StopLLMResponse();
         setIsLoading(false);
         setIsThinking(false);
+        setLlmProgress(null);
     };
 
     const clearMessages = () => {
@@ -1745,9 +1869,6 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                             {i === messages.length - 1 && isLoading && (currentThinking || isThinking) && (
                                                 <ReasoningBox content={currentThinking} isThinking={isThinking} />
                                             )}
-                                            {i === messages.length - 1 && isLoading && provider === 'LM Studio' && (
-                                                <LLMProgressCard progress={llmProgress} />
-                                            )}
                                         </>
                                     )}
                                     <div className="bubble">
@@ -1772,6 +1893,11 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             <div ref={chatEndRef} />
                         </div>
                     </div>
+                    {isLoading && provider === 'LM Studio' && llmProgress?.active && (
+                        <div className="chat-progress-dock">
+                            <LLMProgressCard progress={llmProgress} />
+                        </div>
+                    )}
                     <div className="chat-input-area">
                         <div className="input-wrapper" style={{ fontSize: `${chatFontSize}px`, fontFamily: chatFontFamily }}>
                             <textarea

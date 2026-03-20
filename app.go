@@ -223,10 +223,90 @@ func terminalCommandSuffix() string {
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
+type llmMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	Name    string `json:"name,omitempty"`
+}
+
 func stripANSIEscapeCodes(value string) string {
 	cleaned := ansiEscapePattern.ReplaceAllString(value, "")
 	cleaned = strings.ReplaceAll(cleaned, "\x1b]0;", "")
 	return strings.TrimSpace(cleaned)
+}
+
+func parseLLMMessages(messages []interface{}) []llmMessage {
+	parsed := make([]llmMessage, 0, len(messages))
+	for _, raw := range messages {
+		switch msg := raw.(type) {
+		case map[string]interface{}:
+			role, _ := msg["role"].(string)
+			content, _ := msg["content"].(string)
+			name, _ := msg["name"].(string)
+			parsed = append(parsed, llmMessage{
+				Role:    strings.TrimSpace(role),
+				Content: content,
+				Name:    strings.TrimSpace(name),
+			})
+		case llmMessage:
+			parsed = append(parsed, msg)
+		}
+	}
+	return parsed
+}
+
+func buildLMStudioNativePayload(modelName string, maxTokens int, temperature float64, isStreaming bool, messages []interface{}) map[string]interface{} {
+	parsed := parseLLMMessages(messages)
+	systemPrompt := ""
+	var transcriptParts []string
+
+	for _, msg := range parsed {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+
+		if msg.Role == "system" && systemPrompt == "" {
+			systemPrompt = content
+			continue
+		}
+
+		roleLabel := "User"
+		switch msg.Role {
+		case "assistant":
+			roleLabel = "Assistant"
+		case "tool":
+			if msg.Name != "" {
+				roleLabel = fmt.Sprintf("Tool (%s)", msg.Name)
+			} else {
+				roleLabel = "Tool"
+			}
+		case "system":
+			roleLabel = "System"
+		}
+
+		transcriptParts = append(transcriptParts, fmt.Sprintf("%s:\n%s", roleLabel, content))
+	}
+
+	input := strings.TrimSpace(strings.Join(transcriptParts, "\n\n"))
+	if input == "" {
+		input = "(empty conversation)"
+	}
+
+	payload := map[string]interface{}{
+		"model":             modelName,
+		"input":             input,
+		"stream":            isStreaming,
+		"temperature":       temperature,
+		"max_output_tokens": maxTokens,
+		"store":             false,
+	}
+
+	if systemPrompt != "" {
+		payload["system_prompt"] = systemPrompt
+	}
+
+	return payload
 }
 
 // App struct
@@ -492,26 +572,26 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 	}()
 
 	url := normalizeAPIBaseURL(apiURL)
+	payload := map[string]interface{}{}
 
-	// Handle provider specific paths
-	if provider == "LM Studio" || provider == "Ollama" {
-		if !strings.HasSuffix(url, "/v1") && !strings.HasSuffix(url, "/v1/") {
-			url = strings.TrimSuffix(url, "/") + "/v1"
+	if provider == "LM Studio" {
+		url = strings.TrimSuffix(url, "/") + "/api/v1/chat"
+		payload = buildLMStudioNativePayload(modelName, maxTokens, temperature, isStreaming, messages)
+	} else {
+		if provider == "Ollama" || provider == "OpenAI" {
+			if !strings.HasSuffix(url, "/v1") && !strings.HasSuffix(url, "/v1/") {
+				url = strings.TrimSuffix(url, "/") + "/v1"
+			}
 		}
-	} else if provider == "OpenAI" {
-		if !strings.HasSuffix(url, "/v1") && !strings.HasSuffix(url, "/v1/") {
-			url = strings.TrimSuffix(url, "/") + "/v1"
+
+		url = strings.TrimSuffix(url, "/") + "/chat/completions"
+		payload = map[string]interface{}{
+			"model":       modelName,
+			"messages":    messages,
+			"max_tokens":  maxTokens,
+			"temperature": temperature,
+			"stream":      isStreaming,
 		}
-	}
-
-	url = strings.TrimSuffix(url, "/") + "/chat/completions"
-
-	payload := map[string]interface{}{
-		"model":       modelName,
-		"messages":    messages,
-		"max_tokens":  maxTokens,
-		"temperature": temperature,
-		"stream":      isStreaming,
 	}
 
 	body, err := json.Marshal(payload)
@@ -599,6 +679,31 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 						continue
 					case "prompt_processing.end":
 						emitLLMProgress(a.ctx, "prompt-processing", "Prompt Processed", 100, true)
+						currentEventType = ""
+						continue
+					case "chat.end":
+						if outputItems, ok := eventData["output"].([]interface{}); ok && fullContent == "" {
+							var parts []string
+							for _, item := range outputItems {
+								entry, ok := item.(map[string]interface{})
+								if !ok {
+									continue
+								}
+								itemType, _ := entry["type"].(string)
+								if itemType != "message" {
+									continue
+								}
+								content, _ := entry["content"].(string)
+								content = strings.TrimSpace(content)
+								if content != "" {
+									parts = append(parts, content)
+								}
+							}
+							if len(parts) > 0 {
+								fullContent = strings.Join(parts, "\n\n")
+							}
+						}
+						emitLLMProgress(a.ctx, "", "", 100, false)
 						currentEventType = ""
 						continue
 					case "message.delta":
