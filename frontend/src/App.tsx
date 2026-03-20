@@ -1763,15 +1763,12 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                 <div className="settings-section">
                                     <h4>LLM Configuration</h4>
                                     <div className="settings-grid">
-                                        <div className="settings-field full">
+                                        <div className="settings-field">
                                             <label>Server URL</label>
                                             <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="127.0.0.1:1234" {...textAssistOffProps} />
+                                            <span className="settings-hint">주소:포트 만 입력하세요 예: localhost:1234</span>
                                         </div>
-                                        <div className="settings-field full">
-                                            <label>API Key (필수)</label>
-                                            <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="OpenAI or Local key" {...textAssistOffProps} />
-                                        </div>
-                                        <div className="settings-field full">
+                                        <div className="settings-field">
                                             <label>Model Key</label>
                                             <div className="model-selection-group">
                                                 {provider === 'LM Studio' && availableModels.length > 0 ? (
@@ -1798,15 +1795,25 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                                     </button>
                                                 )}
                                             </div>
+                                            <span className="settings-hint">권장모델: qwen/qwen3.5-35b-a3b, qwen/qwen3.5-9b, nvidia/nemotron-3-nano</span>
                                         </div>
-                                        <div className="settings-field"><label>Max Tokens</label><input type="number" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} /></div>
-                                        <div className="settings-field"><label>Temperature</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>
                                         <div className="settings-field">
                                             <label>LLM Provider</label>
                                             <select value={provider} onChange={e => setProvider(e.target.value)}>
                                                 <option>LM Studio</option><option>OpenAI</option><option>Ollama</option><option>Custom</option>
                                             </select>
+                                            <span className="settings-hint">이 앱은 LM Studio에 최적화 되어있으며, 모든 기능은 LM Studio 모드에서 활성화됩니다.</span>
                                         </div>
+                                        <div className="settings-field">
+                                            <label>API Key (필수)</label>
+                                            <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="OpenAI or Local key" {...textAssistOffProps} />
+                                        </div>
+                                        <div className="settings-field">
+                                            <label>Max Tokens</label>
+                                            <input type="number" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} />
+                                            <span className="settings-hint">값이 높을수록 처리 역량이 상승합니다.</span>
+                                        </div>
+                                        <div className="settings-field"><label>Temperature</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>
                                     </div>
                                 </div>
                                 <div className="settings-section">

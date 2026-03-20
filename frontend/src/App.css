@@ -944,6 +944,14 @@ select {
     color: var(--text-muted);
 }
 
+.settings-hint {
+    display: block;
+    margin-top: 6px;
+    font-size: 10px;
+    line-height: 1.45;
+    color: rgba(214, 224, 239, 0.58);
+}
+
 .settings-field-header {
     display: flex;
     align-items: center;
