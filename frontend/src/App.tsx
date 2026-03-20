@@ -434,7 +434,6 @@ type LLMProgressState = {
     label: string;
     percent: number;
     active: boolean;
-    simulated?: boolean;
 };
 
 const parseSendKeysPayload = (payload: string): string[] | null => {
@@ -922,38 +921,6 @@ function App() {
             unoffProgress();
         };
     }, []);
-
-    useEffect(() => {
-        if (!(isLoading && provider === 'LM Studio')) {
-            setLlmProgress(null);
-            return;
-        }
-
-        const start = Date.now();
-        const interval = window.setInterval(() => {
-            setLlmProgress(prev => {
-                if (prev && !prev.simulated) {
-                    return prev;
-                }
-
-                const elapsed = Date.now() - start;
-                const phase = elapsed < 1400 ? 'model-load' : 'prompt-processing';
-                const percent = phase === 'model-load'
-                    ? Math.min(38, 8 + elapsed / 45)
-                    : Math.min(92, 42 + (elapsed - 1400) / 55);
-
-                return {
-                    phase,
-                    label: phase === 'model-load' ? 'Loading Model...' : 'Processing Prompt...',
-                    percent,
-                    active: true,
-                    simulated: true,
-                };
-            });
-        }, 140);
-
-        return () => window.clearInterval(interval);
-    }, [isLoading, provider]);
 
     const scrollToBottom = () => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
