@@ -686,6 +686,7 @@ function App() {
     const [maxTokens, setMaxTokens] = useState(() => Number(localStorage.getItem('maxTokens')) || 10000);
     const [temperature, setTemperature] = useState(() => Number(localStorage.getItem('temperature')) || 0.7);
     const [provider, setProvider] = useState(() => localStorage.getItem('provider') || 'LM Studio');
+    const [globalUserPrompt, setGlobalUserPrompt] = useState(() => localStorage.getItem('globalUserPrompt') || '');
 
     // Terminal Settings with persistence
     const [termFontSize, setTermFontSize] = useState(() => clampTerminalFontSize(Number(localStorage.getItem('termFontSize')) || 12));
@@ -733,6 +734,7 @@ function App() {
         localStorage.setItem('maxTokens', String(maxTokens));
         localStorage.setItem('temperature', String(temperature));
         localStorage.setItem('provider', provider);
+        localStorage.setItem('globalUserPrompt', globalUserPrompt);
         localStorage.setItem('termFontSize', String(termFontSize));
         localStorage.setItem('termFontFamily', termFontFamily);
         localStorage.setItem('termForeground', termForeground);
@@ -745,7 +747,7 @@ function App() {
         localStorage.setItem('blockedCommandPatterns', blockedCommandPatterns);
         localStorage.setItem('approvalCommandPatterns', approvalCommandPatterns);
         localStorage.setItem('enabledTools', JSON.stringify(enabledTools));
-    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, provider, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools]);
+    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, provider, globalUserPrompt, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools]);
 
     const handleSaveSettings = () => {
         UpdateMCPSettings(mcpPort, mcpLabel);
@@ -1423,6 +1425,16 @@ ${t('greeting')}`
             console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} tools enabled.`);
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
             const complexRequest = isComplexRequest(inputText);
+            const trimmedGlobalUserPrompt = globalUserPrompt.trim();
+            const globalUserPromptSection = trimmedGlobalUserPrompt
+                ? `
+
+5. GLOBAL USER PROMPT:
+Apply the following persistent user guidance unless it conflicts with safety policy, exact tool-call syntax, or the user's current request. Treat it as stable preference/context, not as a new task to execute by itself.
+[BEGIN_GLOBAL_USER_PROMPT]
+${trimmedGlobalUserPrompt}
+[END_GLOBAL_USER_PROMPT]`
+                : '';
 
             const baseSystemPrompt = `You are ${mcpLabel}, a professional AI engineer. 
 1. UI: Use <analysis>, <progress>, and <artifact> blocks when they add value. Keep answers compact and readable in a narrow side chat.
@@ -1449,7 +1461,7 @@ If the user asks to count files, inspect directories, verify paths, read files, 
 When Current OS indicates Windows, assume the terminal shell is PowerShell. Use PowerShell syntax only. Do not use cmd.exe or batch syntax such as \`if exist\`, \`dir /b\`, \`copy\`, \`del\`, \`type\`, \`set VAR=\`, or \`%VAR%\`.
 4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.${buildTaskWorkflowPrompt(complexRequest)}
 Current OS: ${window.navigator.platform}
-Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
+Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserPromptSection}`;
 
             const historyToSend = newMessages.filter((msg, idx) => {
                 if (idx === 0 && msg.role === 'assistant') return false;
@@ -1838,6 +1850,17 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}`;
                                             <span className="settings-hint">{t('tokensHint')}</span>
                                         </div>
                                         <div className="settings-field"><label>{t('temperature')}</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>
+                                        <div className="settings-field full">
+                                            <label>{t('globalUserPrompt')}</label>
+                                            <textarea
+                                                className="settings-textarea settings-prompt-textarea"
+                                                value={globalUserPrompt}
+                                                onChange={e => setGlobalUserPrompt(e.target.value)}
+                                                placeholder={t('globalUserPromptPlaceholder')}
+                                                {...textAssistOffProps}
+                                            />
+                                            <span className="settings-hint">{t('globalUserPromptHint')}</span>
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="settings-section">

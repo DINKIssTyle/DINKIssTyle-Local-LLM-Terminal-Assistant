@@ -1017,6 +1017,10 @@ select {
     line-height: 1.45;
 }
 
+.settings-prompt-textarea {
+    min-height: 128px;
+}
+
 .model-selection-group {
     display: flex;
     gap: 8px;
