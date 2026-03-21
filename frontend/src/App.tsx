@@ -1362,6 +1362,11 @@ ${t('greeting')}`
         const start = Math.max(0, preferredStart);
         const end = Math.min(buffer.length - 1, start + Math.max(term.rows - 1, 0));
         const lines: string[] = [];
+        for (let i = start; i <= end; i += 1) {
+            const line = buffer.getLine(i);
+            if (!line) continue;
+            lines.push(line.translateToString(true));
+        }
 
         return lines.join('\n') || t('terminalEmpty');
     };
@@ -1583,7 +1588,9 @@ ${t('greeting')}`
 
         return /[%#$]\s*$/.test(trimmed)
             || /^[^ \n]+@[^ \n]+.*[%#$]\s*$/.test(trimmed)
-            || /(?:^|\/)[^/\n]+\s[%#$]\s*$/.test(trimmed);
+            || /(?:^|\/)[^/\n]+\s[%#$]\s*$/.test(trimmed)
+            || /^PS [^\r\n>]+>\s*$/.test(trimmed)
+            || /^[A-Za-z]:\\.*>\s*$/.test(trimmed);
     };
 
     const hasRecoveredShellPrompt = (terminalText: string): boolean => {
@@ -1758,10 +1765,18 @@ ${t('greeting')}`
         }
 
         if (tail.includes('terminal tail unavailable')) {
-            return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
+            const visibleOnly = visibleTerminal.trim();
+            if (!visibleOnly || visibleOnly === t('terminalEmpty') || visibleOnly === t('terminalUnavailable')) {
+                return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
+            }
+            return summarizeTerminalTail(getLatestUserRequest(historyToSend), commandText, visibleOnly, [...historyToSend], baseSystemPrompt);
         }
 
-        return summarizeTerminalTail(getLatestUserRequest(historyToSend), commandText, tail, [...historyToSend], baseSystemPrompt);
+        const terminalSummarySource = tail.trim() === '(no recent terminal output)'
+            ? combinedTerminal
+            : tail;
+
+        return summarizeTerminalTail(getLatestUserRequest(historyToSend), commandText, terminalSummarySource, [...historyToSend], baseSystemPrompt);
     };
 
     const ensureAssistantPlaceholder = () => {
