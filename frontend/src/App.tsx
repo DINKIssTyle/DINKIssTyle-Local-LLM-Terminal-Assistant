@@ -775,6 +775,39 @@ const needsContinuationAfterPlan = (response: string): boolean => {
     return !hasExecutionEvidence;
 };
 
+const TOOL_REQUIRED_REQUEST_KEYWORDS = /확인|조회|목록|검색|열어|열기|읽어|읽기|실행|생성|만들|삭제|이동|복사|경로|파일|디렉토리|폴더|버전|cpu|uptime|전원|배터리|시간|현재|status|list|count|check|inspect|read|open|run|execute|file|path|version|power|battery|time/i;
+
+const needsContinuationAfterAnalysisOnly = (response: string, userRequest: string): boolean => {
+    const normalized = response.trim();
+    if (!normalized) return false;
+
+    if (!TOOL_REQUIRED_REQUEST_KEYWORDS.test(userRequest)) {
+        return false;
+    }
+
+    const hasToolCall =
+        /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*(?:{[\s\S]*?})?\s*\]/i.test(normalized)
+        || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
+        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized);
+
+    if (hasToolCall) return false;
+
+    const hasCompletionEvidence =
+        /<walkthrough\b[\s\S]*?<\/walkthrough>/i.test(normalized)
+        || /<report\b[\s\S]*?<\/report>/i.test(normalized)
+        || /<artifact\b[\s\S]*?<\/artifact>/i.test(normalized);
+
+    if (hasCompletionEvidence) return false;
+
+    const hasAnalysis =
+        /<analysis\b[\s\S]*?<\/analysis>/i.test(normalized)
+        || /need to use/i.test(normalized)
+        || /I can use/i.test(normalized)
+        || /해야 합니다/i.test(normalized);
+
+    return hasAnalysis;
+};
+
 const isInteractiveTerminalLaunch = (commandText: string): boolean => {
     const normalized = commandText.trim().toLowerCase();
     if (!normalized) return false;
@@ -989,6 +1022,7 @@ ${t('greeting')}`
     const currentThinkingRef = useRef('');
     const requestSequenceRef = useRef(0);
     const llmProgressHideTimeoutRef = useRef<number | null>(null);
+    const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 
     const getNextTabName = (existingTabs: Tab[]): string => {
         const usedNumbers = new Set(
@@ -1478,8 +1512,6 @@ ${t('greeting')}`
             throw new Error('command cannot be empty');
         }
 
-        const activeTerm = xtermsRef.current[activeTabId];
-        activeTerm?.focus();
         await WriteToTerminal(activeTabId, `${normalized}\r`);
         return `Sent to terminal: ${normalized}`;
     };
@@ -2041,7 +2073,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             }
 
             if (!isCurrentRequest()) return;
-            if (needsContinuationAfterPlan(response)) {
+            if (needsContinuationAfterPlan(response) || needsContinuationAfterAnalysisOnly(response, trimmedInput)) {
                 ensureAssistantPlaceholder();
                 setCurrentThinking('');
                 currentThinkingRef.current = '';
@@ -2051,7 +2083,9 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     { role: 'assistant' as const, content: response },
                     {
                         role: 'user' as const,
-                        content: '[App Notice] The previous reply stopped after an Execution Plan and did not actually carry out the task yet. Continue from that plan now and perform the next concrete action instead of restating the plan.',
+                        content: needsContinuationAfterPlan(response)
+                            ? '[App Notice] The previous reply stopped after an Execution Plan and did not actually carry out the task yet. Continue from that plan now and perform the next concrete action instead of restating the plan.'
+                            : '[App Notice] The previous reply only analyzed the request and did not actually perform the next action yet. Continue now by calling the appropriate tool or terminal command instead of repeating the analysis.',
                     },
                 ];
                 response = await FetchLLMResponse(
@@ -2437,6 +2471,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     <div className="chat-input-area">
                         <div className="input-wrapper" style={{ fontSize: `${chatFontSize}px`, fontFamily: chatFontFamily }}>
                             <textarea
+                                ref={chatInputRef}
                                 className="chat-input"
                                 placeholder={t('chatPlaceholder')}
                                 value={inputText}
