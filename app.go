@@ -234,6 +234,68 @@ func readProgressPercent(eventData map[string]interface{}) int {
 	}
 }
 
+func collectLMStudioChatOutputMessages(eventData map[string]interface{}) string {
+	readOutputItems := func(container map[string]interface{}) []interface{} {
+		if outputItems, ok := container["output"].([]interface{}); ok {
+			return outputItems
+		}
+		return nil
+	}
+
+	outputItems := readOutputItems(eventData)
+	if outputItems == nil {
+		if result, ok := eventData["result"].(map[string]interface{}); ok {
+			outputItems = readOutputItems(result)
+		}
+	}
+	if outputItems == nil {
+		return ""
+	}
+
+	var parts []string
+	for _, item := range outputItems {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		itemType, _ := entry["type"].(string)
+		if itemType != "message" {
+			continue
+		}
+		content, _ := entry["content"].(string)
+		content = strings.TrimSpace(content)
+		if content != "" {
+			parts = append(parts, content)
+		}
+	}
+
+	return strings.Join(parts, "\n\n")
+}
+
+func readLMStudioStreamError(eventData map[string]interface{}) string {
+	errorPayload, ok := eventData["error"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+
+	message, _ := errorPayload["message"].(string)
+	errorType, _ := errorPayload["type"].(string)
+	code, _ := errorPayload["code"].(string)
+
+	details := strings.TrimSpace(message)
+	if details == "" {
+		return ""
+	}
+
+	if errorType != "" && code != "" {
+		return fmt.Sprintf("%s (%s/%s)", details, errorType, code)
+	}
+	if errorType != "" {
+		return fmt.Sprintf("%s (%s)", details, errorType)
+	}
+	return details
+}
+
 func terminalCommandSuffix() string {
 	return "\r"
 }
@@ -781,6 +843,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		scanner := bufio.NewScanner(resp.Body)
 		fullContent := ""
 		currentEventType := ""
+		lastStreamError := ""
 		log.Printf("[LLM] Starting SSE stream scanner...")
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -837,28 +900,19 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 						currentEventType = ""
 						continue
 					case "chat.end":
-						if outputItems, ok := eventData["output"].([]interface{}); ok && fullContent == "" {
-							var parts []string
-							for _, item := range outputItems {
-								entry, ok := item.(map[string]interface{})
-								if !ok {
-									continue
-								}
-								itemType, _ := entry["type"].(string)
-								if itemType != "message" {
-									continue
-								}
-								content, _ := entry["content"].(string)
-								content = strings.TrimSpace(content)
-								if content != "" {
-									parts = append(parts, content)
-								}
-							}
-							if len(parts) > 0 {
-								fullContent = strings.Join(parts, "\n\n")
+						if fullContent == "" {
+							if finalContent := collectLMStudioChatOutputMessages(eventData); finalContent != "" {
+								fullContent = finalContent
 							}
 						}
 						emitLLMProgress(a.ctx, "", "", 100, false)
+						currentEventType = ""
+						continue
+					case "error":
+						if streamError := readLMStudioStreamError(eventData); streamError != "" {
+							lastStreamError = streamError
+							log.Printf("[LLM] Stream error event: %s", streamError)
+						}
 						currentEventType = ""
 						continue
 					case "message.delta":
@@ -909,6 +963,9 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		}
 		log.Printf("[LLM] Stream complete. Total length: %d", len(fullContent))
 		emitLLMProgress(a.ctx, "", "", 100, false)
+		if strings.TrimSpace(fullContent) == "" && lastStreamError != "" {
+			return "", fmt.Errorf("LM Studio stream error: %s", lastStreamError)
+		}
 		return fullContent, nil
 	}
 

@@ -143,6 +143,10 @@ function getTagAttribute(source: string, attribute: string): string {
     return match ? match[1] : '';
 }
 
+function keepDigitsOnly(value: string): string {
+    return value.replace(/[^\d]/g, '');
+}
+
 function renderLooseHtmlBlock(htmlSource: string): string {
     const normalized = htmlSource
         .replace(/<br\s*\/?>/gi, '\n')
@@ -1093,6 +1097,8 @@ function App() {
     const [chatWidth, setChatWidth] = useState(() => Number(localStorage.getItem('chatWidth')) || 450);
     const [mcpPort, setMcpPort] = useState(() => Number(localStorage.getItem('mcpPort')) || 4321);
     const [mcpLabel, setMcpLabel] = useState(() => localStorage.getItem('mcpLabel') || 'dinkisstyle-terminal');
+    const [maxTokensInput, setMaxTokensInput] = useState(() => String(Number(localStorage.getItem('maxTokens')) || 10000));
+    const [mcpPortInput, setMcpPortInput] = useState(() => String(Number(localStorage.getItem('mcpPort')) || 4321));
     const [blockedCommandPatterns, setBlockedCommandPatterns] = useState(() => localStorage.getItem('blockedCommandPatterns') || DEFAULT_BLOCKED_COMMAND_PATTERNS);
     const [approvalCommandPatterns, setApprovalCommandPatterns] = useState(() => localStorage.getItem('approvalCommandPatterns') || DEFAULT_APPROVAL_COMMAND_PATTERNS);
     const isResizing = useRef(false);
@@ -1139,10 +1145,28 @@ function App() {
     }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, provider, globalUserPrompt, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools]);
 
     const handleSaveSettings = () => {
-        UpdateMCPSettings(mcpPort, mcpLabel);
+        const nextMaxTokens = Number.parseInt(maxTokensInput, 10);
+        const nextMcpPort = Number.parseInt(mcpPortInput, 10);
+        const resolvedMaxTokens = Number.isFinite(nextMaxTokens) && nextMaxTokens > 0 ? nextMaxTokens : maxTokens;
+        const resolvedMcpPort = Number.isFinite(nextMcpPort) && nextMcpPort > 0 ? nextMcpPort : mcpPort;
+
+        setMaxTokens(resolvedMaxTokens);
+        setMcpPort(resolvedMcpPort);
+        setMaxTokensInput(String(resolvedMaxTokens));
+        setMcpPortInput(String(resolvedMcpPort));
+
+        UpdateMCPSettings(resolvedMcpPort, mcpLabel);
         setIsSettingsOpen(false);
         setIsMcpDocsOpen(false);
     };
+
+    useEffect(() => {
+        setMaxTokensInput(String(maxTokens));
+    }, [maxTokens]);
+
+    useEffect(() => {
+        setMcpPortInput(String(mcpPort));
+    }, [mcpPort]);
 
     useEffect(() => {
         UpdateMCPSettings(mcpPort, mcpLabel).catch((error) => {
@@ -1689,6 +1713,13 @@ ${t('greeting')}`
 
         if (normalized.includes('<<') && normalized.includes('\\n') && !normalized.includes('\n')) {
             normalized = normalized.replace(/\\n/g, '\n');
+        }
+
+        // LM responses sometimes emit cmd-style escaped quotes for native Windows commands.
+        // PowerShell expects plain quotes here and otherwise can fall into continuation
+        // prompts or pass malformed arguments to native executables such as findstr.
+        if (window.navigator.platform.toLowerCase().includes('win') && normalized.includes('\\"')) {
+            normalized = normalized.replace(/\\"/g, '"');
         }
 
         return normalized;
@@ -2779,7 +2810,14 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                         </div>
                                         <div className="settings-field">
                                             <label>{t('maxTokens')}</label>
-                                            <input type="number" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} />
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                pattern="[0-9]*"
+                                                value={maxTokensInput}
+                                                onChange={e => setMaxTokensInput(keepDigitsOnly(e.target.value))}
+                                                {...textAssistOffProps}
+                                            />
                                             <span className="settings-hint">{t('tokensHint')}</span>
                                         </div>
                                         <div className="settings-field"><label>{t('temperature')}</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>
@@ -2828,7 +2866,14 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                     <div className="settings-grid">
                                         <div className="settings-field">
                                             <label>{t('mcpPort')}</label>
-                                            <input type="number" value={mcpPort} onChange={e => setMcpPort(Number(e.target.value))} />
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                pattern="[0-9]*"
+                                                value={mcpPortInput}
+                                                onChange={e => setMcpPortInput(keepDigitsOnly(e.target.value))}
+                                                {...textAssistOffProps}
+                                            />
                                         </div>
                                         <div className="settings-field">
                                             <label>{t('mcpLabel')}</label>
