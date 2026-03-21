@@ -866,6 +866,7 @@ const detectWindowsPowerShellSyntaxIssue = (command: string): string | null => {
         { pattern: /\bset\s+[a-z_][a-z0-9_]*=/, message: 'Use `$env:VAR = \"value\"` instead of `set VAR=value` on Windows PowerShell.' },
         { pattern: /%[a-z0-9_]+%/i, message: 'Use `$env:VAR` instead of `%VAR%` on Windows PowerShell.' },
         { pattern: /\b&&\b|\b\|\|\b/, message: 'Use PowerShell control flow such as `;`, `if`, `-and`, or `-or` instead of `&&` or `||`.' },
+        { pattern: /\\"/, message: 'Do not use cmd-style escaped quotes such as `\\\"` on Windows PowerShell. Use PowerShell quoting instead, such as single-quoted strings or doubled quotes inside a PowerShell string.' },
     ];
 
     const match = patterns.find(({ pattern }) => pattern.test(normalized));
@@ -1784,10 +1785,16 @@ ${t('greeting')}`
             return null;
         }
 
-        const recentUpper = getRecentMeaningfulTerminalLines(terminalText, 12).join('\n').toUpperCase();
+        const recentLines = getRecentMeaningfulTerminalLines(terminalText, 12);
+        const recentUpper = recentLines.join('\n').toUpperCase();
+        const lastMeaningfulLine = recentLines.length > 0 ? recentLines[recentLines.length - 1].trim() : '';
 
         if (recentUpper.includes('HEREDOC>')) {
             return t('heredocPending');
+        }
+
+        if (lastMeaningfulLine === '>>') {
+            return 'PowerShell is waiting for more input at the `>>` continuation prompt. This usually means the command has an unmatched quote, parenthesis, or other incomplete syntax.';
         }
 
         if (recentUpper.includes('UW PICO') || recentUpper.includes('GNU NANO') || recentUpper.includes('^X EXIT')) {

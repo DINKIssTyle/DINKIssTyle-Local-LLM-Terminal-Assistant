@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -238,6 +239,7 @@ func terminalCommandSuffix() string {
 }
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+var lmStudioContextOverflowPattern = regexp.MustCompile(`n_keep:\s*(\d+)\s*>=\s*n_ctx:\s*(\d+)`)
 
 type llmMessage struct {
 	Role    string `json:"role"`
@@ -323,6 +325,154 @@ func buildLMStudioNativePayload(modelName string, maxTokens int, temperature flo
 	}
 
 	return payload
+}
+
+func clonePayloadMap(payload map[string]interface{}) map[string]interface{} {
+	cloned := make(map[string]interface{}, len(payload))
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func appendLMStudioRetryInstruction(payload map[string]interface{}) map[string]interface{} {
+	cloned := clonePayloadMap(payload)
+	const retryNote = "The previous attempt failed only because of context-length limits. Continue the original task directly without restarting or re-summarizing unless needed."
+
+	if existing, ok := cloned["system_prompt"].(string); ok && strings.TrimSpace(existing) != "" {
+		cloned["system_prompt"] = strings.TrimSpace(existing) + "\n\n" + retryNote
+		return cloned
+	}
+
+	cloned["system_prompt"] = retryNote
+	return cloned
+}
+
+func parseLMStudioContextOverflow(responseBody string) (required int, current int, ok bool) {
+	match := lmStudioContextOverflowPattern.FindStringSubmatch(responseBody)
+	if len(match) != 3 {
+		return 0, 0, false
+	}
+
+	required, errRequired := strconv.Atoi(match[1])
+	current, errCurrent := strconv.Atoi(match[2])
+	if errRequired != nil || errCurrent != nil {
+		return 0, 0, false
+	}
+
+	return required, current, true
+}
+
+func computeLMStudioRetryContextLength(required int, current int) int {
+	headroom := 512
+	if required/10 > headroom {
+		headroom = required / 10
+	}
+
+	target := required + headroom
+	minimumGrowth := current + 1024
+	if target < minimumGrowth {
+		target = minimumGrowth
+	}
+
+	return target
+}
+
+func doJSONPostRequest(ctx context.Context, client *http.Client, url string, apiKey string, payload map[string]interface{}) (*http.Response, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API Error (%s): %s", resp.Status, string(respBody))
+	}
+
+	return resp, nil
+}
+
+func loadLMStudioModelWithContext(ctx context.Context, client *http.Client, apiBaseURL string, apiKey string, modelName string, contextLength int) error {
+	loadURL := strings.TrimSuffix(apiBaseURL, "/") + "/api/v1/models/load"
+	payload := map[string]interface{}{
+		"model":          modelName,
+		"context_length": contextLength,
+	}
+
+	resp, err := doJSONPostRequest(ctx, client, loadURL, apiKey, payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	loadBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[LM STUDIO] Reloaded model %s with context_length=%d. Response: %s", modelName, contextLength, string(loadBody))
+	return nil
+}
+
+func (a *App) sendLMStudioChatWithRecovery(
+	ctx context.Context,
+	client *http.Client,
+	apiBaseURL string,
+	apiKey string,
+	modelName string,
+	payload map[string]interface{},
+) (*http.Response, error) {
+	chatURL := strings.TrimSuffix(apiBaseURL, "/") + "/api/v1/chat"
+
+	resp, err := doJSONPostRequest(ctx, client, chatURL, apiKey, payload)
+	if err == nil {
+		return resp, nil
+	}
+
+	required, current, ok := parseLMStudioContextOverflow(err.Error())
+	if !ok {
+		return nil, err
+	}
+
+	retryContextLength := computeLMStudioRetryContextLength(required, current)
+	log.Printf("[LM STUDIO] Context overflow detected (n_keep=%d, n_ctx=%d). Retrying chat with context_length=%d.", required, current, retryContextLength)
+
+	retryPayload := appendLMStudioRetryInstruction(payload)
+	retryPayload["context_length"] = retryContextLength
+
+	resp, retryErr := doJSONPostRequest(ctx, client, chatURL, apiKey, retryPayload)
+	if retryErr == nil {
+		return resp, nil
+	}
+
+	requiredAfterRetry, currentAfterRetry, retryOverflow := parseLMStudioContextOverflow(retryErr.Error())
+	if retryOverflow {
+		retryContextLength = computeLMStudioRetryContextLength(requiredAfterRetry, currentAfterRetry)
+	}
+
+	log.Printf("[LM STUDIO] Request-level context retry failed. Reloading model %s with context_length=%d and retrying once more.", modelName, retryContextLength)
+	if loadErr := loadLMStudioModelWithContext(ctx, client, apiBaseURL, apiKey, modelName, retryContextLength); loadErr != nil {
+		return nil, fmt.Errorf("%w | model reload failed: %v", retryErr, loadErr)
+	}
+
+	finalPayload := appendLMStudioRetryInstruction(payload)
+	finalPayload["context_length"] = retryContextLength
+	return doJSONPostRequest(ctx, client, chatURL, apiKey, finalPayload)
 }
 
 // App struct
@@ -590,9 +740,9 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 
 	url := normalizeAPIBaseURL(apiURL)
 	payload := map[string]interface{}{}
+	client := &http.Client{}
 
 	if provider == "LM Studio" {
-		url = strings.TrimSuffix(url, "/") + "/api/v1/chat"
 		payload = buildLMStudioNativePayload(modelName, maxTokens, temperature, isStreaming, messages)
 	} else {
 		if provider == "Ollama" || provider == "OpenAI" {
@@ -611,33 +761,21 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		}
 	}
 
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
+	var (
+		resp *http.Response
+		err  error
+	)
+	if provider == "LM Studio" {
+		resp, err = a.sendLMStudioChatWithRecovery(ctx, client, url, apiKey, modelName, payload)
+	} else {
+		resp, err = doJSONPostRequest(ctx, client, url, apiKey, payload)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[LLM] Request failed: %v", err)
 		return "", err
 	}
 	defer resp.Body.Close()
 	log.Printf("[LLM] Received response status: %s", resp.Status)
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API Error (%s): %s", resp.Status, string(respBody))
-	}
 
 	if isStreaming {
 		scanner := bufio.NewScanner(resp.Body)
