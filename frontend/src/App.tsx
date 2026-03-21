@@ -726,11 +726,74 @@ const clampTextFromEnd = (value: string, maxLength: number): string => {
     return `...${normalized.slice(normalized.length - maxLength).trimStart()}`;
 };
 
+const shouldUseComplexTaskMode = (request: string): boolean => {
+    const normalized = request.trim();
+    if (!normalized) return false;
+
+    const sentenceCount = normalized.split(/[.!?\n]/).map(token => token.trim()).filter(Boolean).length;
+    const lineCount = normalized.split('\n').map(token => token.trim()).filter(Boolean).length;
+    const hasCodeLikeContent = /```|`[^`]+`|[{}[\]();]/.test(normalized);
+    const hasPathOrCommandLikeContent = /(^|\s)(\/|~|[A-Za-z]:\\)|\b[a-z0-9_-]+\.[a-z0-9]{1,8}\b/i.test(normalized);
+
+    return normalized.length >= 220
+        || sentenceCount >= 4
+        || lineCount >= 5
+        || (sentenceCount >= 2 && hasCodeLikeContent)
+        || (sentenceCount >= 2 && hasPathOrCommandLikeContent);
+};
+
+const shouldContinueAfterActionlessAnalysis = (response: string, userRequest: string): boolean => {
+    const normalized = response.trim();
+    if (!normalized) return false;
+
+    const hasToolCall =
+        /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*(?:{[\s\S]*?})?\s*\]/i.test(normalized)
+        || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
+        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized);
+
+    if (hasToolCall) return false;
+
+    const hasCompletionEvidence =
+        /<walkthrough\b[\s\S]*?<\/walkthrough>/i.test(normalized)
+        || /<report\b[\s\S]*?<\/report>/i.test(normalized)
+        || /<artifact\b[\s\S]*?<\/artifact>/i.test(normalized);
+
+    if (hasCompletionEvidence) return false;
+
+    const hasAnalysisOnly = /<analysis\b[\s\S]*?<\/analysis>/i.test(normalized);
+    const requestLooksActionable =
+        /[`"'\\/]/.test(userRequest)
+        || /\b[a-z0-9_-]+\.[a-z0-9]{1,8}\b/i.test(userRequest)
+        || /\bhttps?:\/\//i.test(userRequest)
+        || /(^|\s)(\/|~|[A-Za-z]:\\)/.test(userRequest);
+
+    return hasAnalysisOnly && requestLooksActionable;
+};
+
+const detectWindowsPowerShellSyntaxIssue = (command: string): string | null => {
+    const normalized = command.trim().toLowerCase();
+    if (!normalized) return null;
+
+    const patterns: Array<{ pattern: RegExp; message: string }> = [
+        { pattern: /\bif\s+exist\b/, message: 'Use PowerShell syntax instead of cmd.exe syntax. Replace `if exist` with `if (Test-Path ...) { ... }`.' },
+        { pattern: /\bdir\b(?:\s|$)/, message: 'Use a PowerShell cmdlet such as `Get-ChildItem` instead of `dir`.' },
+        { pattern: /\bcopy\b(?:\s|$)/, message: 'Use `Copy-Item` instead of `copy` on Windows PowerShell.' },
+        { pattern: /\bdel\b(?:\s|$)/, message: 'Use `Remove-Item` instead of `del` on Windows PowerShell.' },
+        { pattern: /\btype\b(?:\s|$)/, message: 'Use `Get-Content` instead of `type` on Windows PowerShell.' },
+        { pattern: /\bset\s+[a-z_][a-z0-9_]*=/, message: 'Use `$env:VAR = \"value\"` instead of `set VAR=value` on Windows PowerShell.' },
+        { pattern: /%[a-z0-9_]+%/i, message: 'Use `$env:VAR` instead of `%VAR%` on Windows PowerShell.' },
+        { pattern: /\b&&\b|\b\|\|\b/, message: 'Use PowerShell control flow such as `;`, `if`, `-and`, or `-or` instead of `&&` or `||`.' },
+    ];
+
+    const match = patterns.find(({ pattern }) => pattern.test(normalized));
+    return match ? match.message : null;
+};
+
 const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
     if (!complexRequest) return '';
 
     return `
-5. COMPLEX TASK MODE: If the user's request is multi-step, implementation-heavy, review-heavy, or explicitly asks for a workflow, you MUST structure your response and execution like an agent runbook.
+5. COMPLEX TASK MODE: The app already suspects this request is complex, but you must still judge the request by meaning, not by keywords or UI language. Treat it as complex when it needs multiple steps, implementation, investigation, refactoring, review, or an execution plan.
 6. COMPLEX TASK FORMAT: For the first substantial assistant response, include these blocks in order when they add value:
    <analysis>Short diagnosis of the request and constraints</analysis>
    <tasklist title="Execution Plan" description="What will be handled end-to-end">
@@ -1401,8 +1464,7 @@ ${t('greeting')}`
     };
 
     const shouldIncludeScreenContext = (history: Message[]): boolean => {
-        const latestUserRequest = getLatestUserRequest(history);
-        return SCREEN_CONTEXT_KEYWORDS.test(latestUserRequest);
+        return history.length > 0;
     };
 
     const buildScreenContext = (history: Message[]): string => {
@@ -2024,7 +2086,7 @@ ${t('greeting')}`
             const activeTools = availableTools.filter(t => enabledTools.includes(t.name));
             console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} tools enabled.`);
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
-            const complexRequest = isComplexRequest(trimmedInput);
+            const complexRequest = shouldUseComplexTaskMode(trimmedInput);
             const trimmedGlobalUserPrompt = globalUserPrompt.trim();
             const globalUserPromptSection = trimmedGlobalUserPrompt
                 ? `
@@ -2063,6 +2125,11 @@ Example: To create a text file on Windows, output:
 ALWAYS use the tool when the user asks for terminal actions.
 If the user asks for latest web information, website verification, or online reading, use search_web and read_web_page instead of saying web browsing is unavailable.
 If the user asks to count files, inspect directories, verify paths, read files, or confirm system state, use terminal commands even if something similar is visible in SCREEN_CONTEXT.
+Before answering, classify the request by meaning rather than surface keywords:
+- Treat it as a complex task when it needs multiple steps, implementation, investigation, refactoring, review, or a concrete execution plan.
+- Treat it as requiring tools when the answer depends on checking files, directories, paths, terminal output, processes, versions, command results, or other system state.
+- Treat it as requiring screen context when the user refers to the current UI, visible terminal state, recent on-screen output, or ambiguous references such as "this", "that", or "why is it like this".
+These judgments must work regardless of whether the user writes in Korean, English, Japanese, Chinese, or another language.
 If terminal control appears stuck inside an interactive program and ESC, :q, exit, or other normal quit sequences do not restore the shell prompt, send CTRL_C to interrupt the program and recover the terminal prompt. This also applies on macOS terminals: use CTRL_C, not CMD_C.
 When Current OS indicates Windows, assume the terminal shell is PowerShell. Use PowerShell syntax only. Do not use cmd.exe or batch syntax such as \`if exist\`, \`dir /b\`, \`copy\`, \`del\`, \`type\`, \`set VAR=\`, or \`%VAR%\`.
 If the user asks to create, overwrite, append, rename, move, or delete files on Windows, do it with PowerShell commands through EXECUTE_COMMAND, not with a file tool.
@@ -2112,7 +2179,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             }
 
             if (!isCurrentRequest()) return;
-            if (needsContinuationAfterPlan(response) || needsContinuationAfterAnalysisOnly(response, trimmedInput)) {
+            if (needsContinuationAfterPlan(response) || shouldContinueAfterActionlessAnalysis(response, trimmedInput)) {
                 ensureAssistantPlaceholder();
                 setCurrentThinking('');
                 currentThinkingRef.current = '';
@@ -2167,7 +2234,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         : toolArgs;
                     const commandPolicy = classifyCommand(commandText);
                     const windowsCmdSyntaxError = toolName === 'execute_command' && window.navigator.platform.toLowerCase().includes('win')
-                        ? detectWindowsCmdSyntax(commandText)
+                        ? detectWindowsPowerShellSyntaxIssue(commandText)
                         : null;
                     const toolIsAvailable = activeTools.some(tool => tool.name === toolName);
 
