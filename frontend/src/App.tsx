@@ -83,6 +83,7 @@ function stripMarkupForContext(text: string): string {
         .replace(/<analysis>([\s\S]*?)<\/analysis>/gi, '$1')
         .replace(/<progress[^>]*>([\s\S]*?)<\/progress>/gi, '$1')
         .replace(/<tasklist[^>]*>([\s\S]*?)<\/tasklist>/gi, '$1')
+        .replace(/<execution_plan[^>]*>([\s\S]*?)<\/execution_plan>/gi, '$1')
         .replace(/<walkthrough[^>]*>([\s\S]*?)<\/walkthrough>/gi, '$1')
         .replace(/<report[^>]*>([\s\S]*?)<\/report>/gi, '$1')
         .replace(/<artifact[^>]*>([\s\S]*?)<\/artifact>/gi, '$1')
@@ -207,6 +208,21 @@ function renderMarkdown(text: string): string {
     });
 
     html = html.replace(/<tasklist\b([^>]*)>([\s\S]*?)<\/tasklist>/gi, (_, attrs, content) => {
+        const title = getTagAttribute(attrs, 'title') || 'Execution Plan';
+        const desc = getTagAttribute(attrs, 'description');
+        const items = renderStructuredItems(extractStructuredListItems(content));
+
+        return stash(`<section class="message-block tasklist-block">
+            <div class="progress-header">
+                <span>${renderInlineMarkdown(title)}</span>
+                <span class="progress-meta">Tasks</span>
+            </div>
+            ${desc ? `<div class="progress-description">${renderInlineMarkdown(desc)}</div>` : ''}
+            <div class="progress-list">${items}</div>
+        </section>`);
+    });
+
+    html = html.replace(/<execution_plan\b([^>]*)>([\s\S]*?)<\/execution_plan>/gi, (_, attrs, content) => {
         const title = getTagAttribute(attrs, 'title') || 'Execution Plan';
         const desc = getTagAttribute(attrs, 'description');
         const items = renderStructuredItems(extractStructuredListItems(content));
@@ -829,8 +845,10 @@ const needsContinuationAfterPlan = (response: string): boolean => {
     const normalized = response.trim();
     if (!normalized) return false;
 
-    const hasTasklist = /<tasklist\b[\s\S]*?<\/tasklist>/i.test(normalized);
-    if (!hasTasklist) return false;
+    const hasPlanBlock =
+        /<tasklist\b[\s\S]*?<\/tasklist>/i.test(normalized)
+        || /<execution_plan\b[\s\S]*?<\/execution_plan>/i.test(normalized);
+    if (!hasPlanBlock) return false;
 
     const hasExecutionEvidence =
         /<walkthrough\b[\s\S]*?<\/walkthrough>/i.test(normalized)
@@ -841,7 +859,18 @@ const needsContinuationAfterPlan = (response: string): boolean => {
         || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
         || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized);
 
-    return !hasExecutionEvidence;
+    return !hasExecutionEvidence || /<\/execution_plan>\s*$/i.test(normalized);
+};
+
+const needsContinuationAfterTrailingSection = (response: string): boolean => {
+    const normalized = response.trim();
+    if (!normalized) return false;
+
+    if (/<report\b[\s\S]*?<\/report>\s*$/i.test(normalized)) {
+        return false;
+    }
+
+    return /<\/(?:progress|tasklist|execution_plan|walkthrough)>\s*$/i.test(normalized);
 };
 
 const TOOL_REQUIRED_REQUEST_KEYWORDS = /확인|조회|목록|검색|열어|열기|읽어|읽기|실행|생성|만들|삭제|이동|복사|경로|파일|디렉토리|폴더|버전|cpu|uptime|전원|배터리|시간|현재|status|list|count|check|inspect|read|open|run|execute|file|path|version|power|battery|time/i;
@@ -2179,7 +2208,11 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             }
 
             if (!isCurrentRequest()) return;
-            if (needsContinuationAfterPlan(response) || shouldContinueAfterActionlessAnalysis(response, trimmedInput)) {
+            if (
+                needsContinuationAfterPlan(response)
+                || needsContinuationAfterTrailingSection(response)
+                || shouldContinueAfterActionlessAnalysis(response, trimmedInput)
+            ) {
                 ensureAssistantPlaceholder();
                 setCurrentThinking('');
                 currentThinkingRef.current = '';
@@ -2191,6 +2224,8 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         role: 'user' as const,
                         content: needsContinuationAfterPlan(response)
                             ? '[App Notice] The previous reply stopped after an Execution Plan and did not actually carry out the task yet. Continue from that plan now and perform the next concrete action instead of restating the plan.'
+                            : needsContinuationAfterTrailingSection(response)
+                                ? '[App Notice] The previous reply ended on a progress-like section and appears incomplete. Continue from the last section now and perform the next concrete action or finish the report instead of repeating prior sections.'
                             : '[App Notice] The previous reply only analyzed the request and did not actually perform the next action yet. Continue now by calling the appropriate tool or terminal command instead of repeating the analysis.',
                     },
                 ];
