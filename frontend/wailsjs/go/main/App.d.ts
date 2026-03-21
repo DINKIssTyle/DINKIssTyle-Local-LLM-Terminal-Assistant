@@ -4,6 +4,8 @@ import {mcp} from '../models';
 
 export function CallTool(arg1:string,arg2:string):Promise<string>;
 
+export function ClearTerminalContext(arg1:string):Promise<void>;
+
 export function FetchAvailableModels(arg1:string,arg2:string):Promise<Array<string>>;
 
 export function FetchLLMResponse(arg1:string,arg2:string,arg3:string,arg4:number,arg5:number,arg6:string,arg7:boolean,arg8:Array<any>):Promise<string>;

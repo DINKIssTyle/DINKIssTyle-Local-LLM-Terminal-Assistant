@@ -10,7 +10,7 @@ import '@xterm/xterm/css/xterm.css';
 import './App.css';
 import mcpDocsContent from './assets/docs/mcp.md?raw';
 import { getTranslation, Language } from './i18n/translations';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
 import { EventsOn, EventsEmit } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
@@ -156,6 +156,85 @@ function formatThoughtDuration(durationMs: number): string {
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
     return seconds === 0 ? `Thought for ${minutes}m` : `Thought for ${minutes}m ${seconds}s`;
+}
+
+function stripBackspaceArtifacts(value: string): string {
+    const chars: string[] = [];
+    for (const char of value) {
+        if (char === '\b') {
+            chars.pop();
+            continue;
+        }
+        chars.push(char);
+    }
+    return chars.join('');
+}
+
+function compactTerminalContext(value: string): string {
+    const normalized = stripBackspaceArtifacts(value)
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n');
+
+    const sourceLines = normalized.split('\n').map(line => line.trimEnd());
+    const compactedLines: string[] = [];
+    let blankRun = 0;
+
+    for (const line of sourceLines) {
+        const trimmed = line.trim();
+        const previous = compactedLines.length > 0 ? compactedLines[compactedLines.length - 1] : '';
+        const previousTrimmed = previous.trim();
+        const looksLikePrompt = /^(PS [^\n>]+>|[A-Za-z]:\\.*>)\s*$/.test(trimmed);
+
+        if (!trimmed) {
+            blankRun += 1;
+            if (blankRun <= 1) {
+                compactedLines.push('');
+            }
+            continue;
+        }
+
+        blankRun = 0;
+        if (looksLikePrompt && previousTrimmed === trimmed) {
+            continue;
+        }
+
+        compactedLines.push(line);
+    }
+
+    return compactedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function isSyntheticToolResponseContent(value: string): boolean {
+    return /^\[Tool Response from [^\]]+\]:/i.test(value.trim());
+}
+
+function safeJsonStringify(value: unknown): string {
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return String(value);
+    }
+}
+
+function maskSensitiveText(value: string, apiKey: string): string {
+    let masked = value;
+    if (apiKey) {
+        masked = masked.split(apiKey).join('[redacted-api-key]');
+    }
+    return masked;
+}
+
+function createEmptyDebugTrace(): DebugTrace {
+    return {
+        screenContext: '',
+        requestMessages: '',
+        requestMeta: '',
+        rawResponse: '',
+        parsedToolCall: '',
+        toolExecutions: [],
+        terminalNotes: '',
+        updatedAt: null,
+    };
 }
 
 function renderLooseHtmlBlock(htmlSource: string): string {
@@ -467,6 +546,25 @@ interface Tab {
     id: string;
     name: string;
 }
+
+type DebugPanelTab = 'context' | 'request' | 'response' | 'tools' | 'terminal';
+
+type DebugToolExecution = {
+    tool: string;
+    args: string;
+    result: string;
+};
+
+type DebugTrace = {
+    screenContext: string;
+    requestMessages: string;
+    requestMeta: string;
+    rawResponse: string;
+    parsedToolCall: string;
+    toolExecutions: DebugToolExecution[];
+    terminalNotes: string;
+    updatedAt: number | null;
+};
 
 const ASSISTANT_DISPLAY_NAME = 'Assistant';
 const DEFAULT_BLOCKED_COMMAND_PATTERNS = [
@@ -1114,6 +1212,9 @@ function App() {
     const [mcpLabel, setMcpLabel] = useState(() => localStorage.getItem('mcpLabel') || 'dinkisstyle-terminal');
     const [maxTokensInput, setMaxTokensInput] = useState(() => String(Number(localStorage.getItem('maxTokens')) || 10000));
     const [mcpPortInput, setMcpPortInput] = useState(() => String(Number(localStorage.getItem('mcpPort')) || 4321));
+    const [debugPanelEnabled, setDebugPanelEnabled] = useState(() => localStorage.getItem('debugPanelEnabled') === 'true');
+    const [debugPanelTab, setDebugPanelTab] = useState<DebugPanelTab>('context');
+    const [debugTrace, setDebugTrace] = useState<DebugTrace>(() => createEmptyDebugTrace());
     const [blockedCommandPatterns, setBlockedCommandPatterns] = useState(() => localStorage.getItem('blockedCommandPatterns') || DEFAULT_BLOCKED_COMMAND_PATTERNS);
     const [approvalCommandPatterns, setApprovalCommandPatterns] = useState(() => localStorage.getItem('approvalCommandPatterns') || DEFAULT_APPROVAL_COMMAND_PATTERNS);
     const isResizing = useRef(false);
@@ -1157,7 +1258,8 @@ function App() {
         localStorage.setItem('blockedCommandPatterns', blockedCommandPatterns);
         localStorage.setItem('approvalCommandPatterns', approvalCommandPatterns);
         localStorage.setItem('enabledTools', JSON.stringify(enabledTools));
-    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, provider, globalUserPrompt, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools]);
+        localStorage.setItem('debugPanelEnabled', String(debugPanelEnabled));
+    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, provider, globalUserPrompt, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools, debugPanelEnabled]);
 
     const handleSaveSettings = () => {
         const nextMaxTokens = Number.parseInt(maxTokensInput, 10);
@@ -1507,6 +1609,36 @@ ${t('greeting')}`
         return duration;
     };
 
+    const updateDebugTrace = (patch: Partial<DebugTrace>) => {
+        setDebugTrace(prev => ({
+            ...prev,
+            ...patch,
+            updatedAt: Date.now(),
+        }));
+    };
+
+    const appendDebugToolExecution = (entry: DebugToolExecution) => {
+        setDebugTrace(prev => ({
+            ...prev,
+            toolExecutions: [...prev.toolExecutions.slice(-11), entry],
+            updatedAt: Date.now(),
+        }));
+    };
+
+    const renderDebugPanelContent = () => {
+        const sections: Record<DebugPanelTab, string> = {
+            context: debugTrace.screenContext || '(no context captured yet)',
+            request: [debugTrace.requestMeta, debugTrace.requestMessages].filter(Boolean).join('\n\n') || '(no request captured yet)',
+            response: [debugTrace.rawResponse, debugTrace.parsedToolCall].filter(Boolean).join('\n\n') || '(no response captured yet)',
+            tools: debugTrace.toolExecutions.length > 0
+                ? safeJsonStringify(debugTrace.toolExecutions)
+                : '(no tool executions captured yet)',
+            terminal: debugTrace.terminalNotes || '(no terminal diagnostics captured yet)',
+        };
+
+        return sections[debugPanelTab];
+    };
+
     useEffect(() => {
         scrollToBottom();
     }, [messages, currentThinking]);
@@ -1644,7 +1776,7 @@ ${t('greeting')}`
 
         try {
             const buffer = await GetRecentTerminalBuffer(tabId, TERMINAL_CONTEXT_CHAR_LIMIT);
-            const normalized = (buffer || '').trim();
+            const normalized = compactTerminalContext(buffer || '');
             recentTerminalBuffersRef.current[tabId] = normalized || t('terminalEmpty');
             return recentTerminalBuffersRef.current[tabId];
         } catch {
@@ -1659,7 +1791,7 @@ ${t('greeting')}`
     );
 
     const getCondensedVisibleTerminalText = (): string => {
-        const visible = getVisibleTerminalText();
+        const visible = compactTerminalContext(getVisibleTerminalText());
         return clampTextFromEnd(visible, 1200);
     };
 
@@ -1669,10 +1801,14 @@ ${t('greeting')}`
 
     const buildScreenContext = (history: Message[]): string => {
         const activeTab = tabs.find(tab => tab.id === activeTabId);
-        const visibleChat = history.slice(-4).map(message => {
-            const roleLabel = message.role === 'user' ? 'User' : message.role === 'assistant' ? 'Assistant' : message.role;
-            return `${roleLabel}: ${clampText(stripMarkupForContext(message.content) || '(empty)', 240)}`;
-        }).join('\n');
+        const visibleChat = history
+            .filter(message => !isSyntheticToolResponseContent(message.content))
+            .slice(-4)
+            .map(message => {
+                const roleLabel = message.role === 'user' ? 'User' : message.role === 'assistant' ? 'Assistant' : message.role;
+                return `${roleLabel}: ${clampText(stripMarkupForContext(message.content) || '(empty)', 240)}`;
+            })
+            .join('\n');
 
         return [
             `ACTIVE_TAB: ${activeTab?.name || activeTabId}`,
@@ -1833,7 +1969,21 @@ ${t('greeting')}`
         }
 
         const llmMessages = buildLLMMessages(historyToSend, baseSystemPrompt, { includeScreenContext: false });
+        updateDebugTrace({
+            requestMeta: maskSensitiveText([
+                `Provider: ${provider}`,
+                `Model: ${modelName}`,
+                `MaxTokens: ${maxTokens}`,
+                `Temperature: ${temperature}`,
+                `Context Source: continueAfterToolExecution`,
+            ].join('\n'), apiKey),
+            requestMessages: maskSensitiveText(safeJsonStringify(llmMessages), apiKey),
+            terminalNotes: `Continuation after ${toolName}\nResult summary:\n${result}`,
+        });
         nextResponse = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
+        updateDebugTrace({
+            rawResponse: maskSensitiveText(nextResponse, apiKey),
+        });
         return nextResponse;
     };
 
@@ -1855,7 +2005,7 @@ ${t('greeting')}`
     const getLatestUserRequest = (history: Message[]): string => {
         for (let index = history.length - 1; index >= 0; index -= 1) {
             const message = history[index];
-            if (message.role === 'user' && message.content?.trim()) {
+            if (message.role === 'user' && message.content?.trim() && !isSyntheticToolResponseContent(message.content)) {
                 return message.content.trim();
             }
         }
@@ -1943,7 +2093,22 @@ ${t('greeting')}`
 
         await syncRecentTerminalContextBuffer(activeTabId);
         const llmMessages = buildLLMMessages(terminalContext, analysisPrompt, { includeScreenContext: true });
-        return FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
+        updateDebugTrace({
+            requestMeta: maskSensitiveText([
+                `Provider: ${provider}`,
+                `Model: ${modelName}`,
+                `MaxTokens: ${maxTokens}`,
+                `Temperature: ${temperature}`,
+                `Context Source: summarizeTerminalTail`,
+            ].join('\n'), apiKey),
+            requestMessages: maskSensitiveText(safeJsonStringify(llmMessages), apiKey),
+            terminalNotes: `Terminal follow-up\nCommand: ${commandText}\n\nTail:\n${terminalTail}`,
+        });
+        const followUpResponse = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
+        updateDebugTrace({
+            rawResponse: maskSensitiveText(followUpResponse, apiKey),
+        });
+        return followUpResponse;
     };
 
     const callToolWithClientTimeout = async (
@@ -2366,8 +2531,25 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             const loopHistory = [...historyToSend];
 
             await syncRecentTerminalContextBuffer(activeTabId);
+            const initialScreenContext = shouldIncludeScreenContext(loopHistory) ? buildScreenContext(loopHistory) : '(screen context disabled)';
             let currentMessages: any[] = buildLLMMessages(loopHistory, baseSystemPrompt, {
                 includeScreenContext: shouldIncludeScreenContext(loopHistory),
+            });
+            updateDebugTrace({
+                screenContext: maskSensitiveText(initialScreenContext, apiKey),
+                requestMeta: maskSensitiveText([
+                    `Provider: ${provider}`,
+                    `Model: ${modelName}`,
+                    `MaxTokens: ${maxTokens}`,
+                    `Temperature: ${temperature}`,
+                    `Context Source: sendMessage`,
+                    `Messages: ${currentMessages.length}`,
+                ].join('\n'), apiKey),
+                requestMessages: maskSensitiveText(safeJsonStringify(currentMessages), apiKey),
+                rawResponse: '',
+                parsedToolCall: '',
+                toolExecutions: [],
+                terminalNotes: '',
             });
             console.log(`[LLM] Sending ${currentMessages.length} messages (screen context: ${shouldIncludeScreenContext(loopHistory) ? 'on' : 'off'})`);
             let response = '';
@@ -2392,6 +2574,9 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 }
 
                 response = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, currentMessages);
+                updateDebugTrace({
+                    rawResponse: maskSensitiveText(response, apiKey),
+                });
                 if (!isCurrentRequest()) return;
             } catch (err) {
                 if (!isCurrentRequest()) return;
@@ -2425,6 +2610,19 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     },
                 ];
                 await syncRecentTerminalContextBuffer(activeTabId);
+                updateDebugTrace({
+                    screenContext: maskSensitiveText(buildScreenContext(continuationHistory), apiKey),
+                    requestMeta: maskSensitiveText([
+                        `Provider: ${provider}`,
+                        `Model: ${modelName}`,
+                        `MaxTokens: ${maxTokens}`,
+                        `Temperature: ${temperature}`,
+                        `Context Source: continuation`,
+                    ].join('\n'), apiKey),
+                    requestMessages: maskSensitiveText(safeJsonStringify(buildLLMMessages(continuationHistory, baseSystemPrompt, {
+                        includeScreenContext: shouldIncludeScreenContext(continuationHistory),
+                    })), apiKey),
+                });
                 response = await FetchLLMResponse(
                     apiUrl,
                     apiKey,
@@ -2437,6 +2635,9 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         includeScreenContext: shouldIncludeScreenContext(continuationHistory),
                     }),
                 );
+                updateDebugTrace({
+                    rawResponse: maskSensitiveText(response, apiKey),
+                });
                 if (!isCurrentRequest()) return;
                 setIsThinking(false);
             }
@@ -2451,6 +2652,9 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 }
 
                 const parsedToolCall = parseToolCallFromResponse(response);
+                updateDebugTrace({
+                    parsedToolCall: parsedToolCall ? maskSensitiveText(safeJsonStringify(parsedToolCall), apiKey) : '(no tool call parsed)',
+                });
                 if (parsedToolCall) {
                     const { raw, toolName, commandText, parsedKeys, toolArgs } = parsedToolCall;
                     const normalizedSendKeys = toolName === 'send_keys'
@@ -2592,6 +2796,11 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             messagesRef.current = next;
                             return next;
                         });
+                        appendDebugToolExecution({
+                            tool: toolName,
+                            args: effectiveToolArgs,
+                            result,
+                        });
                         if (shouldContinueAfterToolExecution(toolName)) {
                             ensureAssistantPlaceholder();
                             setCurrentThinking('');
@@ -2701,6 +2910,14 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
         setCurrentThinking('');
         currentThinkingRef.current = '';
         resetReasoningTimer();
+        setDebugTrace(prev => ({
+            ...prev,
+            rawResponse: '',
+            parsedToolCall: '',
+            toolExecutions: [],
+            terminalNotes: '',
+            updatedAt: Date.now(),
+        }));
         if (llmProgressHideTimeoutRef.current !== null) {
             window.clearTimeout(llmProgressHideTimeoutRef.current);
             llmProgressHideTimeoutRef.current = null;
@@ -2717,6 +2934,13 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
         requestSequenceRef.current += 1;
         await StopLLMResponse();
         resetInFlightUiState();
+        try {
+            await ClearTerminalContext(activeTabId);
+        } catch (error) {
+            console.warn('[Terminal] Failed to clear terminal context buffer:', error);
+        }
+        recentTerminalBuffersRef.current[activeTabId] = t('terminalEmpty');
+        setDebugTrace(createEmptyDebugTrace());
         const nextMessages: Message[] = [{
             role: 'assistant',
             content: `<analysis>System Lifecycle: Reset Success</analysis>
@@ -2759,18 +2983,48 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             </button>
                         </div>
                     </div>
-                    <div className="terminal-container-wrapper">
-                        {tabs.map(tab => (
-                            <div
-                                key={tab.id}
-                                className={`terminal-container ${activeTabId === tab.id ? 'active' : ''}`}
-                                ref={el => terminalContainersRef.current[tab.id] = el}
-                                onMouseDown={() => {
-                                    setActiveTabId(tab.id);
-                                    xtermsRef.current[tab.id]?.focus();
-                                }}
-                            ></div>
-                        ))}
+                    <div className={`terminal-container-wrapper ${debugPanelEnabled ? 'debug-enabled' : ''}`}>
+                        <div className="terminal-stage">
+                            {tabs.map(tab => (
+                                <div
+                                    key={tab.id}
+                                    className={`terminal-container ${activeTabId === tab.id ? 'active' : ''}`}
+                                    ref={el => terminalContainersRef.current[tab.id] = el}
+                                    onMouseDown={() => {
+                                        setActiveTabId(tab.id);
+                                        xtermsRef.current[tab.id]?.focus();
+                                    }}
+                                ></div>
+                            ))}
+                        </div>
+                        {debugPanelEnabled && (
+                            <aside className="debug-panel">
+                                <div className="debug-panel-header">
+                                    <span>Debug Trace</span>
+                                    <span className="debug-panel-meta">{debugTrace.updatedAt ? new Date(debugTrace.updatedAt).toLocaleTimeString() : 'idle'}</span>
+                                </div>
+                                <div className="debug-tab-row">
+                                    {([
+                                        ['context', 'Context'],
+                                        ['request', 'LLM Request'],
+                                        ['response', 'LLM Response'],
+                                        ['tools', 'Tools'],
+                                        ['terminal', 'Terminal'],
+                                    ] as Array<[DebugPanelTab, string]>).map(([tabId, label]) => (
+                                        <button
+                                            key={tabId}
+                                            className={`debug-tab-btn ${debugPanelTab === tabId ? 'active' : ''}`}
+                                            onClick={() => setDebugPanelTab(tabId)}
+                                        >
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div className="debug-panel-body">
+                                    <pre>{renderDebugPanelContent()}</pre>
+                                </div>
+                            </aside>
+                        )}
                     </div>
                 </div>
 
@@ -3038,6 +3292,22 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                                 {...textAssistOffProps}
                                             />
                                             <span style={{ fontSize: '10px', opacity: 0.6 }}>{t('approvalHint')}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="settings-section">
+                                    <h4>Debug</h4>
+                                    <div className="settings-grid">
+                                        <div className="settings-field full">
+                                            <label className="settings-checkbox-row">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={debugPanelEnabled}
+                                                    onChange={e => setDebugPanelEnabled(e.target.checked)}
+                                                />
+                                                <span>Show debug side panel inside the terminal area</span>
+                                            </label>
+                                            <span className="settings-hint">Displays the final screen context, LLM request payload, raw LLM response, parsed tool calls, tool execution results, and terminal follow-up notes.</span>
                                         </div>
                                     </div>
                                 </div>

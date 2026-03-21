@@ -757,6 +757,20 @@ func (a *App) GetRecentTerminalBuffer(id string, maxChars int) (string, error) {
 	return buffer, nil
 }
 
+func (a *App) ClearTerminalContext(id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	term, exists := a.terminals[id]
+	if !exists {
+		return fmt.Errorf("terminal session %s not found", id)
+	}
+
+	term.ClearOutput()
+	delete(a.lastCommandCursor, id)
+	return nil
+}
+
 // UpdateMCPSettings updates the internal MCP server configuration
 func (a *App) UpdateMCPSettings(port int, label string) {
 	a.mu.Lock()

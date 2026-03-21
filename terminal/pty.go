@@ -153,6 +153,14 @@ func (t *Terminal) TailChars(maxChars int) string {
 	return strings.TrimSpace(normalized[len(normalized)-maxChars:])
 }
 
+func (t *Terminal) ClearOutput() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.outputTail = ""
+	t.lastDataAt = time.Time{}
+}
+
 func (t *Terminal) OutputCursor() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -6,6 +6,10 @@ export function CallTool(arg1, arg2) {
   return window['go']['main']['App']['CallTool'](arg1, arg2);
 }
 
+export function ClearTerminalContext(arg1) {
+  return window['go']['main']['App']['ClearTerminalContext'](arg1);
+}
+
 export function FetchAvailableModels(arg1, arg2) {
   return window['go']['main']['App']['FetchAvailableModels'](arg1, arg2);
 }
