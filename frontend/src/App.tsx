@@ -720,6 +720,12 @@ const clampText = (value: string, maxLength: number): string => {
     return `${normalized.slice(0, maxLength).trimEnd()}...`;
 };
 
+const clampTextFromEnd = (value: string, maxLength: number): string => {
+    const normalized = value.trim();
+    if (normalized.length <= maxLength) return normalized;
+    return `...${normalized.slice(normalized.length - maxLength).trimStart()}`;
+};
+
 const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
     if (!complexRequest) return '';
 
@@ -1214,6 +1220,16 @@ ${t('greeting')}`
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
+    const isTerminalNearBottom = (term: any): boolean => {
+        const buffer = term?.buffer?.active;
+        if (!buffer || typeof term?.rows !== 'number') return true;
+
+        const viewportY = typeof buffer.viewportY === 'number' ? buffer.viewportY : 0;
+        const rows = Math.max(term.rows, 1);
+        const bottomViewportY = Math.max(buffer.baseY - Math.max(rows - 1, 0), 0);
+        return viewportY >= bottomViewportY - 1;
+    };
+
     useEffect(() => {
         messagesRef.current = messages;
     }, [messages]);
@@ -1229,8 +1245,11 @@ ${t('greeting')}`
             if (!fitAddon || !term) return;
 
             try {
+                const shouldKeepBottom = isTerminalNearBottom(term);
                 fitAddon.fit();
-                term.scrollToBottom();
+                if (shouldKeepBottom) {
+                    term.scrollToBottom();
+                }
                 if (term.rows > 0 && term.cols > 0) {
                     ResizeTerminal(tabId, term.cols, term.rows);
                 }
@@ -1258,6 +1277,7 @@ ${t('greeting')}`
 
             const term = new Terminal({
                 cursorBlink: true,
+                scrollback: 5000,
                 fontSize: termFontSize,
                 fontFamily: termFontFamily,
                 theme: {
@@ -1278,8 +1298,12 @@ ${t('greeting')}`
 
             term.onData(data => WriteToTerminal(tab.id, data));
             const unoff = EventsOn("terminal:data:" + tab.id, (data: string) => {
-                term.write(data);
-                scheduleTerminalFit(tab.id);
+                const shouldKeepBottom = isTerminalNearBottom(term);
+                term.write(data, () => {
+                    if (shouldKeepBottom) {
+                        term.scrollToBottom();
+                    }
+                });
             });
             StartTerminal(tab.id);
             (term as any)._unoff = unoff;
@@ -1373,7 +1397,7 @@ ${t('greeting')}`
 
     const getCondensedVisibleTerminalText = (): string => {
         const visible = getVisibleTerminalText();
-        return clampText(visible, 1200);
+        return clampTextFromEnd(visible, 1200);
     };
 
     const shouldIncludeScreenContext = (history: Message[]): boolean => {
