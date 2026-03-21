@@ -10,7 +10,7 @@ import '@xterm/xterm/css/xterm.css';
 import './App.css';
 import mcpDocsContent from './assets/docs/mcp.md?raw';
 import { getTranslation, Language } from './i18n/translations';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
 import { EventsOn, EventsEmit } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
@@ -145,6 +145,17 @@ function getTagAttribute(source: string, attribute: string): string {
 
 function keepDigitsOnly(value: string): string {
     return value.replace(/[^\d]/g, '');
+}
+
+function formatThoughtDuration(durationMs: number): string {
+    const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+    if (totalSeconds < 60) {
+        return `Thought for ${totalSeconds}s`;
+    }
+
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return seconds === 0 ? `Thought for ${minutes}m` : `Thought for ${minutes}m ${seconds}s`;
 }
 
 function renderLooseHtmlBlock(htmlSource: string): string {
@@ -444,6 +455,7 @@ interface Message {
     content: string;
     name?: string;
     reasoning?: string;
+    reasoningDurationMs?: number;
     commandRequest?: {
         status: 'approval' | 'blocked';
         command: string;
@@ -515,6 +527,8 @@ type ParsedToolCall = {
     parsedKeys: string[];
     toolArgs: string;
 };
+
+const TERMINAL_CONTEXT_CHAR_LIMIT = 4000;
 
 type LLMProgressState = {
     phase: 'model-load' | 'prompt-processing';
@@ -664,9 +678,9 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         return {
             raw: noArgsMatch[0],
             toolName,
-            commandText: toolName,
+            commandText: '',
             parsedKeys: [],
-            toolArgs: '{}',
+            toolArgs: '',
         };
     }
 
@@ -1035,7 +1049,7 @@ const detectWindowsCmdSyntax = (command: string): string | null => {
     return match ? match.message : null;
 };
 
-const ReasoningBox = ({ content, isThinking }: { content: string, isThinking: boolean }) => {
+const ReasoningBox = ({ content, isThinking, durationMs }: { content: string, isThinking: boolean, durationMs?: number }) => {
     const [isCollapsed, setIsCollapsed] = useState(!isThinking);
 
     useEffect(() => {
@@ -1048,7 +1062,7 @@ const ReasoningBox = ({ content, isThinking }: { content: string, isThinking: bo
         <div className={`reasoning-status ${isCollapsed ? 'collapsed' : ''}`} style={{ background: '#111', border: 'none' }}>
             <div className="reasoning-header" onClick={() => setIsCollapsed(!isCollapsed)} style={{ color: '#888', textTransform: 'none', border: 'none' }}>
                 <span style={{ fontSize: '10px' }}>{isCollapsed ? '▶' : '▼'}</span>
-                <span>{isThinking ? 'Thinking...' : 'Thought for 3s'}</span>
+                <span>{isThinking ? 'Thinking...' : formatThoughtDuration(durationMs || 0)}</span>
             </div>
             {!isCollapsed && (
                 <div className="reasoning-body" style={{ color: '#eee', background: '#000' }}>
@@ -1065,6 +1079,7 @@ function App() {
     const xtermsRef = useRef<{ [id: string]: Terminal | null }>({});
     const fitAddonsRef = useRef<{ [id: string]: FitAddon | null }>({});
     const fitTimeoutsRef = useRef<number[]>([]);
+    const recentTerminalBuffersRef = useRef<Record<string, string>>({});
 
     const [tabs, setTabs] = useState<Tab[]>([{ id: '1', name: 'Tab 1' }]);
     const [activeTabId, setActiveTabId] = useState('1');
@@ -1205,11 +1220,14 @@ ${t('greeting')}`
     const chatEndRef = useRef<HTMLDivElement>(null);
     const [currentThinking, setCurrentThinking] = useState('');
     const [isThinking, setIsThinking] = useState(false);
+    const [currentReasoningStartedAt, setCurrentReasoningStartedAt] = useState<number | null>(null);
+    const [currentReasoningDurationMs, setCurrentReasoningDurationMs] = useState(0);
     const [llmProgress, setLlmProgress] = useState<LLMProgressState | null>(null);
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [isFetchingModels, setIsFetchingModels] = useState(false);
     const messagesRef = useRef<Message[]>(messages);
     const currentThinkingRef = useRef('');
+    const currentReasoningStartedAtRef = useRef<number | null>(null);
     const requestSequenceRef = useRef(0);
     const llmProgressHideTimeoutRef = useRef<number | null>(null);
     const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1355,6 +1373,7 @@ ${t('greeting')}`
         });
 
         const unoffThinking = EventsOn("llm:thinking", (chunk: string) => {
+            beginReasoningTimer();
             setCurrentThinking(prev => prev + chunk);
             setIsThinking(true);
         });
@@ -1422,6 +1441,22 @@ ${t('greeting')}`
         currentThinkingRef.current = currentThinking;
     }, [currentThinking]);
 
+    useEffect(() => {
+        currentReasoningStartedAtRef.current = currentReasoningStartedAt;
+    }, [currentReasoningStartedAt]);
+
+    useEffect(() => {
+        if (!isThinking || currentReasoningStartedAt === null) return;
+
+        const updateDuration = () => {
+            setCurrentReasoningDurationMs(Date.now() - currentReasoningStartedAt);
+        };
+
+        updateDuration();
+        const timer = window.setInterval(updateDuration, 500);
+        return () => window.clearInterval(timer);
+    }, [isThinking, currentReasoningStartedAt]);
+
     const scheduleTerminalFit = (tabId: string) => {
         const runFit = () => {
             const fitAddon = fitAddonsRef.current[tabId];
@@ -1447,6 +1482,29 @@ ${t('greeting')}`
             const timeout = window.setTimeout(runFit, delay);
             fitTimeoutsRef.current.push(timeout);
         });
+    };
+
+    const beginReasoningTimer = () => {
+        if (currentReasoningStartedAtRef.current !== null) return;
+        const startedAt = Date.now();
+        currentReasoningStartedAtRef.current = startedAt;
+        setCurrentReasoningStartedAt(startedAt);
+        setCurrentReasoningDurationMs(0);
+    };
+
+    const resetReasoningTimer = () => {
+        currentReasoningStartedAtRef.current = null;
+        setCurrentReasoningStartedAt(null);
+        setCurrentReasoningDurationMs(0);
+    };
+
+    const finalizeReasoningDuration = () => {
+        if (currentReasoningStartedAtRef.current === null) {
+            return 0;
+        }
+        const duration = Math.max(0, Date.now() - currentReasoningStartedAtRef.current);
+        setCurrentReasoningDurationMs(duration);
+        return duration;
     };
 
     useEffect(() => {
@@ -1482,6 +1540,7 @@ ${t('greeting')}`
 
             term.onData(data => WriteToTerminal(tab.id, data));
             const unoff = EventsOn("terminal:data:" + tab.id, (data: string) => {
+                void syncRecentTerminalContextBuffer(tab.id);
                 const shouldKeepBottom = isTerminalNearBottom(term);
                 term.write(data, () => {
                     if (shouldKeepBottom) {
@@ -1519,6 +1578,7 @@ ${t('greeting')}`
     useEffect(() => {
         if (activeTabId) {
             scheduleTerminalFit(activeTabId);
+            void syncRecentTerminalContextBuffer(activeTabId);
         }
     }, [activeTabId, chatWidth]);
 
@@ -1579,6 +1639,25 @@ ${t('greeting')}`
         return lines.join('\n') || t('terminalEmpty');
     };
 
+    const syncRecentTerminalContextBuffer = async (tabId: string) => {
+        if (!tabId) return t('terminalEmpty');
+
+        try {
+            const buffer = await GetRecentTerminalBuffer(tabId, TERMINAL_CONTEXT_CHAR_LIMIT);
+            const normalized = (buffer || '').trim();
+            recentTerminalBuffersRef.current[tabId] = normalized || t('terminalEmpty');
+            return recentTerminalBuffersRef.current[tabId];
+        } catch {
+            const fallback = recentTerminalBuffersRef.current[tabId] || t('terminalEmpty');
+            recentTerminalBuffersRef.current[tabId] = fallback;
+            return fallback;
+        }
+    };
+
+    const getRecentTerminalContextBuffer = (tabId: string): string => (
+        recentTerminalBuffersRef.current[tabId] || t('terminalEmpty')
+    );
+
     const getCondensedVisibleTerminalText = (): string => {
         const visible = getVisibleTerminalText();
         return clampTextFromEnd(visible, 1200);
@@ -1598,6 +1677,8 @@ ${t('greeting')}`
         return [
             `ACTIVE_TAB: ${activeTab?.name || activeTabId}`,
             `CHAT_WIDTH: ${chatWidth}px`,
+            'RECENT_TERMINAL_BUFFER:',
+            getRecentTerminalContextBuffer(activeTabId),
             'VISIBLE_TERMINAL:',
             getCondensedVisibleTerminalText(),
             'VISIBLE_CHAT:',
@@ -1744,6 +1825,7 @@ ${t('greeting')}`
         responseSansCommand: string,
     ) => {
         appendToolResultToHistory(historyToSend, toolName, toolArgs, result);
+        await syncRecentTerminalContextBuffer(activeTabId);
 
         let nextResponse = '';
         if (responseSansCommand) {
@@ -1859,6 +1941,7 @@ ${t('greeting')}`
             },
         ];
 
+        await syncRecentTerminalContextBuffer(activeTabId);
         const llmMessages = buildLLMMessages(terminalContext, analysisPrompt, { includeScreenContext: true });
         return FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
     };
@@ -2133,6 +2216,7 @@ ${t('greeting')}`
         setIsLoading(true);
         setIsThinking(false);
         setCurrentThinking('');
+        resetReasoningTimer();
 
         try {
             const { result, timedOut } = await callToolWithClientTimeout(request.toolName, request.toolArgs);
@@ -2168,12 +2252,14 @@ ${t('greeting')}`
                 setIsThinking(false);
             }
 
+            const reasoningDurationMs = finalizeReasoningDuration();
             setMessages(prev => {
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
                 if (last?.role === 'assistant') {
                     last.content = response || '명령 실행은 완료되었지만 후속 응답이 비어 있습니다.';
                     last.reasoning = currentThinking;
+                    last.reasoningDurationMs = reasoningDurationMs;
                     return updated;
                 }
                 return [...updated, { role: 'assistant', content: response || '명령 실행은 완료되었지만 후속 응답이 비어 있습니다.', reasoning: currentThinking }];
@@ -2183,6 +2269,7 @@ ${t('greeting')}`
         } finally {
             setIsLoading(false);
             setIsThinking(false);
+            resetReasoningTimer();
         }
     };
 
@@ -2209,6 +2296,7 @@ ${t('greeting')}`
         setCurrentThinking('');
         currentThinkingRef.current = '';
         setIsThinking(false);
+        resetReasoningTimer();
         setLlmProgress({
             phase: 'prompt-processing',
             label: 'Processing Prompt...',
@@ -2277,6 +2365,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             });
             const loopHistory = [...historyToSend];
 
+            await syncRecentTerminalContextBuffer(activeTabId);
             let currentMessages: any[] = buildLLMMessages(loopHistory, baseSystemPrompt, {
                 includeScreenContext: shouldIncludeScreenContext(loopHistory),
             });
@@ -2286,6 +2375,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             setCurrentThinking('');
             currentThinkingRef.current = '';
             setIsThinking(true);
+            resetReasoningTimer();
 
             // Initialize assistant message for streaming
             setMessages(prev => {
@@ -2331,9 +2421,10 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             ? '[App Notice] The previous reply stopped after an Execution Plan and did not actually carry out the task yet. Continue from that plan now and perform the next concrete action instead of restating the plan.'
                             : needsContinuationAfterTrailingSection(response)
                                 ? '[App Notice] The previous reply ended on a progress-like section and appears incomplete. Continue from the last section now and perform the next concrete action or finish the report instead of repeating prior sections.'
-                            : '[App Notice] The previous reply only analyzed the request and did not actually perform the next action yet. Continue now by calling the appropriate tool or terminal command instead of repeating the analysis.',
+                                : '[App Notice] The previous reply only analyzed the request and did not actually perform the next action yet. Continue now by calling the appropriate tool or terminal command instead of repeating the analysis.',
                     },
                 ];
+                await syncRecentTerminalContextBuffer(activeTabId);
                 response = await FetchLLMResponse(
                     apiUrl,
                     apiKey,
@@ -2372,6 +2463,10 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     const effectiveToolArgs = toolName === 'send_keys'
                         ? JSON.stringify({ keys: effectiveParsedKeys })
                         : toolArgs;
+                    const missingRequiredToolArgs = (
+                        (toolName === 'execute_command' || toolName === 'send_keys')
+                        && !effectiveToolArgs.trim()
+                    );
                     const commandPolicy = classifyCommand(commandText);
                     const windowsCmdSyntaxError = toolName === 'execute_command' && window.navigator.platform.toLowerCase().includes('win')
                         ? detectWindowsPowerShellSyntaxIssue(commandText)
@@ -2393,6 +2488,24 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                 loopHistory,
                                 baseSystemPrompt,
                                 response,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
+                    }
+
+                    if (missingRequiredToolArgs) {
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            '{}',
+                            `Error: ${toolName} requires explicit arguments. Do not emit [TOOL: ${toolName}] by itself. Re-issue the tool call with the required JSON payload and continue the task.`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
                         );
                         if (!isCurrentRequest()) return;
                         setIsThinking(false);
@@ -2550,12 +2663,14 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 return;
             }
 
+            const reasoningDurationMs = finalizeReasoningDuration();
             setMessages(prev => {
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
                 if (last && last.role === 'assistant') {
                     last.content = stripToolCallMarkup(response);
                     last.reasoning = currentThinkingRef.current;
+                    last.reasoningDurationMs = reasoningDurationMs;
                 }
                 messagesRef.current = updated;
                 return updated;
@@ -2573,6 +2688,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                 setIsLoading(false);
                 setIsThinking(false);
                 setLlmProgress(null);
+                resetReasoningTimer();
             }
         }
     };
@@ -2584,6 +2700,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
         setLlmProgress(null);
         setCurrentThinking('');
         currentThinkingRef.current = '';
+        resetReasoningTimer();
         if (llmProgressHideTimeoutRef.current !== null) {
             window.clearTimeout(llmProgressHideTimeoutRef.current);
             llmProgressHideTimeoutRef.current = null;
@@ -2679,11 +2796,11 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                         <>
                                             {/* Historical reasoning */}
                                             {m.reasoning && !isLoading && (
-                                                <ReasoningBox content={m.reasoning} isThinking={false} />
+                                                <ReasoningBox content={m.reasoning} isThinking={false} durationMs={m.reasoningDurationMs} />
                                             )}
                                             {/* Active reasoning for the last message */}
                                             {i === messages.length - 1 && isLoading && (currentThinking || isThinking) && (
-                                                <ReasoningBox content={currentThinking} isThinking={isThinking} />
+                                                <ReasoningBox content={currentThinking} isThinking={isThinking} durationMs={currentReasoningDurationMs} />
                                             )}
                                         </>
                                     )}

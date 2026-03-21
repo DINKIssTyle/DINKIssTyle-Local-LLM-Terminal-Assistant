@@ -8,6 +8,8 @@ export function FetchAvailableModels(arg1:string,arg2:string):Promise<Array<stri
 
 export function FetchLLMResponse(arg1:string,arg2:string,arg3:string,arg4:number,arg5:number,arg6:string,arg7:boolean,arg8:Array<any>):Promise<string>;
 
+export function GetRecentTerminalBuffer(arg1:string,arg2:number):Promise<string>;
+
 export function GetTools():Promise<Array<mcp.Tool>>;
 
 export function Greet(arg1:string):Promise<string>;

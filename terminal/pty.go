@@ -139,6 +139,20 @@ func (t *Terminal) TailLines(lines int) string {
 	return strings.TrimSpace(strings.Join(split[len(split)-lines:], "\n"))
 }
 
+func (t *Terminal) TailChars(maxChars int) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	normalized := strings.ReplaceAll(t.outputTail, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	normalized = strings.TrimSpace(normalized)
+	if maxChars <= 0 || len(normalized) <= maxChars {
+		return normalized
+	}
+
+	return strings.TrimSpace(normalized[len(normalized)-maxChars:])
+}
+
 func (t *Terminal) OutputCursor() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

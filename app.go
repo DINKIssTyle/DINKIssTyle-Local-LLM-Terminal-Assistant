@@ -736,6 +736,27 @@ func (a *App) ReadActiveTerminalTail(lines int, maxWaitMs int, idleMs int) (stri
 	return tail, nil
 }
 
+func (a *App) GetRecentTerminalBuffer(id string, maxChars int) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	term, exists := a.terminals[id]
+	if !exists {
+		return "", fmt.Errorf("terminal session %s not found", id)
+	}
+
+	if maxChars <= 0 {
+		maxChars = 1800
+	}
+
+	buffer := stripANSIEscapeCodes(term.TailChars(maxChars))
+	if buffer == "" {
+		return "(no recent terminal output)", nil
+	}
+
+	return buffer, nil
+}
+
 // UpdateMCPSettings updates the internal MCP server configuration
 func (a *App) UpdateMCPSettings(port int, label string) {
 	a.mu.Lock()

@@ -14,6 +14,10 @@ export function FetchLLMResponse(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
   return window['go']['main']['App']['FetchLLMResponse'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
 }
 
+export function GetRecentTerminalBuffer(arg1, arg2) {
+  return window['go']['main']['App']['GetRecentTerminalBuffer'](arg1, arg2);
+}
+
 export function GetTools() {
   return window['go']['main']['App']['GetTools']();
 }
