@@ -531,6 +531,70 @@ const parseSendKeysPayload = (payload: string): string[] | null => {
     }
 };
 
+const parseToolPayloadObject = (payload: string): Record<string, unknown> | null => {
+    const trimmed = payload.trim();
+    const candidates: string[] = [trimmed];
+
+    if (trimmed.startsWith('{')) {
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+
+        for (let index = 0; index < trimmed.length; index += 1) {
+            const char = trimmed[index];
+
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (char === '\\') {
+                    escaped = true;
+                    continue;
+                }
+                if (char === '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (char === '"') {
+                inString = true;
+                continue;
+            }
+
+            if (char === '{') {
+                depth += 1;
+                continue;
+            }
+
+            if (char === '}') {
+                depth -= 1;
+                if (depth === 0) {
+                    const balanced = trimmed.slice(0, index + 1);
+                    if (balanced !== trimmed) {
+                        candidates.push(balanced);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    for (const candidate of candidates) {
+        try {
+            const parsed = JSON.parse(candidate);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return parsed as Record<string, unknown>;
+            }
+        } catch {
+            // Try the next candidate.
+        }
+    }
+
+    return null;
+};
+
 const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const executeRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
     const sendKeysRegex = /(?:>>>|<<<)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
@@ -604,7 +668,10 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
 
     try {
         const toolName = bracketMatch[1].toLowerCase();
-        const payload = JSON.parse(bracketMatch[2]);
+        const payload = parseToolPayloadObject(bracketMatch[2]);
+        if (!payload) {
+            return null;
+        }
         if (toolName === 'execute_command' && typeof payload.command === 'string') {
             return {
                 raw: bracketMatch[0],
