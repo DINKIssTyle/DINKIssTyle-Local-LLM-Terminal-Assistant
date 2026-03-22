@@ -576,6 +576,16 @@ type DebugTrace = {
     updatedAt: number | null;
 };
 
+type TaskMemory = {
+    request: string;
+    stage: 'plan' | 'execute' | 'inspect' | 'finalize';
+    recentRequests: string[];
+    planItems: string[];
+    stepResults: string[];
+    latestEvidence: string[];
+    draftResponse: string;
+};
+
 const ASSISTANT_DISPLAY_NAME = 'Assistant';
 const DEFAULT_BLOCKED_COMMAND_PATTERNS = [
     'rm -rf /',
@@ -637,6 +647,11 @@ type ParsedToolCall = {
 };
 
 const TERMINAL_CONTEXT_CHAR_LIMIT = 4000;
+const TASK_MEMORY_REQUEST_LIMIT = 3;
+const TASK_MEMORY_PLAN_LIMIT = 6;
+const TASK_MEMORY_STEP_LIMIT = 8;
+const TASK_MEMORY_EVIDENCE_LIMIT = 4;
+const TASK_MEMORY_RECENT_MESSAGE_LIMIT = 8;
 
 type LLMProgressState = {
     phase: 'model-load' | 'prompt-processing';
@@ -946,6 +961,194 @@ const clampTextFromEnd = (value: string, maxLength: number): string => {
     const normalized = value.trim();
     if (normalized.length <= maxLength) return normalized;
     return `...${normalized.slice(normalized.length - maxLength).trimStart()}`;
+};
+
+const extractTagContents = (value: string, tagName: string): string[] => {
+    const regex = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'gi');
+    const matches: string[] = [];
+    let match: RegExpExecArray | null = null;
+
+    while ((match = regex.exec(value)) !== null) {
+        const content = stripMarkupForContext(match[1] || '');
+        if (content) {
+            matches.push(content);
+        }
+    }
+
+    return matches;
+};
+
+const getMeaningfulUserHistory = (history: Message[]): Message[] => (
+    history.filter(message => message.role === 'user' && message.content.trim() && !isSyntheticToolResponseContent(message.content))
+);
+
+const inferTaskStage = (history: Message[]): TaskMemory['stage'] => {
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+        const message = history[index];
+        const content = message.content.trim();
+        if (!content) continue;
+
+        if (message.role === 'tool') return 'inspect';
+        if (message.role === 'user') return 'plan';
+        if (message.role === 'assistant') {
+            return parseToolCallFromResponse(content) ? 'execute' : 'finalize';
+        }
+    }
+
+    return 'plan';
+};
+
+const summarizeToolContentForMemory = (message: Message): string => {
+    const normalized = stripMarkupForContext(message.content);
+    if (!normalized) {
+        return message.name ? `${message.name}: (empty result)` : '(empty result)';
+    }
+
+    const commandMatch = normalized.match(/Command:\s*`?([^`\n]+)`?/i);
+    const statusMatch = normalized.match(/Status:\s*([\s\S]*)$/i);
+    const commandText = commandMatch?.[1]?.trim();
+    const statusText = statusMatch ? clampText(stripMarkupForContext(statusMatch[1]), 180) : clampText(normalized, 180);
+    const toolName = message.name || 'tool';
+
+    if (commandText) {
+        return `${toolName}: ${commandText} -> ${statusText}`;
+    }
+
+    return `${toolName}: ${statusText}`;
+};
+
+const summarizeMessageForMemory = (message: Message): string => {
+    if (message.role === 'tool') {
+        return summarizeToolContentForMemory(message);
+    }
+
+    const normalized = stripToolCallMarkup(stripMarkupForContext(message.content));
+    if (!normalized) return '';
+
+    if (message.role === 'assistant') {
+        return clampText(normalized, 220);
+    }
+
+    if (message.role === 'system') {
+        return clampText(normalized, 180);
+    }
+
+    return clampText(normalized, 200);
+};
+
+const collectPlanItems = (history: Message[]): string[] => {
+    const collected: string[] = [];
+
+    for (const message of history) {
+        if (message.role !== 'assistant') continue;
+
+        const sections = [
+            ...extractTagContents(message.content, 'tasklist'),
+            ...extractTagContents(message.content, 'execution_plan'),
+            ...extractTagContents(message.content, 'progress'),
+        ];
+
+        for (const section of sections) {
+            const items = extractStructuredListItems(section);
+            for (const item of items) {
+                const text = clampText(stripMarkupForContext(item.text), 140);
+                if (!text || collected.includes(text)) continue;
+                collected.push(text);
+                if (collected.length >= TASK_MEMORY_PLAN_LIMIT) {
+                    return collected;
+                }
+            }
+        }
+    }
+
+    return collected;
+};
+
+const buildTaskMemory = (history: Message[]): TaskMemory => {
+    const meaningfulUsers = getMeaningfulUserHistory(history);
+    const recentRequests = meaningfulUsers
+        .slice(-TASK_MEMORY_REQUEST_LIMIT)
+        .map(message => clampText(stripMarkupForContext(message.content), 180));
+    const request = recentRequests[recentRequests.length - 1] || '';
+
+    const planItems = collectPlanItems(history);
+    const stepResults = history
+        .filter(message => message.role === 'tool' || (message.role === 'assistant' && !parseToolCallFromResponse(message.content) && message.content.trim()))
+        .map(summarizeMessageForMemory)
+        .filter(Boolean)
+        .slice(-TASK_MEMORY_STEP_LIMIT);
+
+    const latestEvidence = history
+        .filter(message => {
+            if (message.role === 'tool') return true;
+            if (message.role === 'user' && /\[Latest user request\]/.test(message.content)) return true;
+            return false;
+        })
+        .map(summarizeMessageForMemory)
+        .filter(Boolean)
+        .slice(-TASK_MEMORY_EVIDENCE_LIMIT);
+
+    const latestAssistant = [...history]
+        .reverse()
+        .find(message => message.role === 'assistant' && !parseToolCallFromResponse(message.content) && stripToolCallMarkup(message.content).trim());
+
+    return {
+        request,
+        stage: inferTaskStage(history),
+        recentRequests,
+        planItems,
+        stepResults,
+        latestEvidence,
+        draftResponse: latestAssistant ? clampText(stripToolCallMarkup(stripMarkupForContext(latestAssistant.content)), 240) : '',
+    };
+};
+
+const renderTaskMemory = (memory: TaskMemory): string => {
+    const sections: string[] = [
+        `CURRENT_REQUEST: ${memory.request || '(none)'}`,
+        `CURRENT_STAGE: ${memory.stage}`,
+    ];
+
+    if (memory.recentRequests.length > 0) {
+        sections.push(`RECENT_REQUESTS:\n${memory.recentRequests.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+    }
+
+    if (memory.planItems.length > 0) {
+        sections.push(`WORKING_PLAN:\n${memory.planItems.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+    }
+
+    if (memory.stepResults.length > 0) {
+        sections.push(`STEP_RESULTS:\n${memory.stepResults.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+    }
+
+    if (memory.latestEvidence.length > 0) {
+        sections.push(`LATEST_EVIDENCE:\n${memory.latestEvidence.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+    }
+
+    if (memory.draftResponse) {
+        sections.push(`DRAFT_RESPONSE:\n${memory.draftResponse}`);
+    }
+
+    sections.push('Use TASK_MEMORY as the primary summary of prior work. Prefer it over replaying the full transcript, but verify with tools whenever the answer depends on system state or fresh output.');
+
+    return sections.join('\n\n');
+};
+
+const buildCompactHistory = (history: Message[]): Message[] => {
+    return history
+        .filter((message, index) => {
+            if (index === 0 && message.role === 'assistant') return false;
+            if (message.role === 'system' && /^🔧 Executing /.test(message.content.trim())) return false;
+            return Boolean(message.content.trim());
+        })
+        .slice(-TASK_MEMORY_RECENT_MESSAGE_LIMIT)
+        .map((message) => {
+            const maxLength = message.role === 'tool' ? 420 : message.role === 'assistant' ? 520 : 360;
+            return {
+                ...message,
+                content: clampTextFromEnd(message.content, maxLength),
+            };
+        });
 };
 
 const shouldUseComplexTaskMode = (request: string): boolean => {
@@ -1917,13 +2120,18 @@ ${t('greeting')}`
         options?: { includeScreenContext?: boolean }
     ) => {
         const includeScreenContext = options?.includeScreenContext ?? false;
-        const systemContent = includeScreenContext
-            ? `${baseSystemPrompt}\n\nSCREEN_CONTEXT:\n${buildScreenContext(history)}`
-            : baseSystemPrompt;
+        const taskMemory = buildTaskMemory(history);
+        const compactHistory = buildCompactHistory(history);
+        const systemSections = [baseSystemPrompt, `TASK_MEMORY:\n${renderTaskMemory(taskMemory)}`];
+
+        if (includeScreenContext) {
+            systemSections.push(`SCREEN_CONTEXT:\n${buildScreenContext(history)}`);
+        }
+
         return [{
             role: 'system',
-            content: systemContent,
-        }, ...history];
+            content: systemSections.join('\n\n'),
+        }, ...compactHistory];
     };
 
     const summarizeToolResultForHistory = (toolName: string, result: string): string => {
