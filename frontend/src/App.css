@@ -738,6 +738,34 @@ select {
     line-height: 1.4;
 }
 
+.artifact-body {
+    padding: 12px 14px 14px;
+}
+
+.artifact-body > :first-child {
+    margin-top: 0;
+}
+
+.artifact-body > :last-child {
+    margin-bottom: 0;
+}
+
+.artifact-body p,
+.artifact-body ul,
+.artifact-body ol,
+.artifact-body table,
+.artifact-body pre,
+.artifact-body hr,
+.artifact-body h1,
+.artifact-body h2,
+.artifact-body h3,
+.artifact-body h4,
+.artifact-body h5,
+.artifact-body h6 {
+    margin-top: 0;
+    margin-bottom: 12px;
+}
+
 .progress-list {
     display: flex;
     flex-direction: column;

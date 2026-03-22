@@ -81,7 +81,7 @@ export const translations = {
         chatFontSize: "채팅창 폰트 크기",
         chatFontFamily: "채팅창 폰트 패밀리",
         chatPlaceholder: "메시지를 입력하세요...",
-        chatLoadingPlaceholder: "응답을 중지하려면 새 메시지나 ESC를 누르세요...",
+        chatLoadingPlaceholder: "응답을 중지하려면 새 메시지를 입력하거나 ESC를 누르세요...",
         llmConfig: "LLM 구성",
         serverUrl: "서버 URL",
         modelKey: "모델 키",

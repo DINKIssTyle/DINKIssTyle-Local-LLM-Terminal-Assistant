@@ -32,6 +32,63 @@ function renderInlineMarkdown(text: string): string {
     return html;
 }
 
+function isMarkdownTableSeparatorLine(line: string): boolean {
+    return /^\s*\|?[\-\s:|]+\|?\s*$/.test(line.trim());
+}
+
+function looksLikeMarkdownTableRow(line: string): boolean {
+    const trimmed = line.trim();
+    return trimmed.includes('|') && !/^[*-]\s+/.test(trimmed);
+}
+
+function splitMarkdownBlocks(text: string): string[] {
+    const sourceLines = text.replace(/\r\n/g, '\n').split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+
+    const flush = () => {
+        const value = current.join('\n').trim();
+        if (value) blocks.push(value);
+        current = [];
+    };
+
+    let index = 0;
+    while (index < sourceLines.length) {
+        const line = sourceLines[index];
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+            flush();
+            index += 1;
+            continue;
+        }
+
+        const next = sourceLines[index + 1] || '';
+        if (looksLikeMarkdownTableRow(line) && isMarkdownTableSeparatorLine(next)) {
+            flush();
+            const tableLines = [line, next];
+            index += 2;
+
+            while (index < sourceLines.length) {
+                const tableLine = sourceLines[index];
+                if (!tableLine.trim()) break;
+                if (!looksLikeMarkdownTableRow(tableLine)) break;
+                tableLines.push(tableLine);
+                index += 1;
+            }
+
+            blocks.push(tableLines.join('\n').trim());
+            continue;
+        }
+
+        current.push(line);
+        index += 1;
+    }
+
+    flush();
+    return blocks;
+}
+
 function renderTextBlock(block: string): string {
     const lines = block.split('\n').map(line => line.trimEnd()).filter(Boolean);
     if (lines.length === 0) return '';
@@ -50,8 +107,8 @@ function renderTextBlock(block: string): string {
 
     const isTableBlock =
         lines.length >= 2 &&
-        lines.every(line => line.includes('|')) &&
-        /^\s*\|?[\-\s:|]+\|?\s*$/.test(lines[1]);
+        lines.every(looksLikeMarkdownTableRow) &&
+        isMarkdownTableSeparatorLine(lines[1]);
 
     if (isTableBlock) {
         const parseTableRow = (line: string) => line
@@ -250,6 +307,20 @@ function renderLooseHtmlBlock(htmlSource: string): string {
     return renderTextBlock(normalized);
 }
 
+function renderArtifactBody(content: string): string {
+    const trimmed = content.trim();
+    if (!trimmed) return '';
+
+    const normalized = trimmed
+        .replace(/\r\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n');
+
+    return splitMarkdownBlocks(normalized)
+        .map(block => renderTextBlock(block.trim()))
+        .filter(Boolean)
+        .join('');
+}
+
 function renderMarkdown(text: string): string {
     if (!text) return '';
 
@@ -372,10 +443,28 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
+    html = html.replace(/<artifact\b([^>]*)>([\s\S]*?)<\/artifact>/gi, (_, attrs, content) => {
+        const title = getTagAttribute(attrs, 'title') || getTagAttribute(attrs, 'name') || humanizeArtifactLabel(getTagAttribute(attrs, 'id') || 'Artifact');
+        const desc = getTagAttribute(attrs, 'description');
+        const type = humanizeArtifactLabel(getTagAttribute(attrs, 'type') || 'artifact');
+        const body = renderArtifactBody(content);
+
+        return stash(`<section class="artifact-card">
+            <div class="artifact-header">
+                <div class="artifact-title">${renderInlineMarkdown(title)}</div>
+            </div>
+            <div class="artifact-type">${renderInlineMarkdown(type)}</div>
+            ${desc ? `<div class="artifact-desc">${renderInlineMarkdown(desc)}</div>` : ''}
+            ${body ? `<div class="artifact-body">${body}</div>` : ''}
+        </section>`);
+    });
+
     html = html.replace(/<artifact([^>]*)>/gi, (_, attrs) => {
         const typeMatch = attrs.match(/type="([^"]*)"/i);
         const idMatch = attrs.match(/id="([^"]*)"/i);
-        const title = humanizeArtifactLabel(idMatch?.[1] || 'Artifact');
+        const nameMatch = attrs.match(/name="([^"]*)"/i);
+        const titleMatch = attrs.match(/title="([^"]*)"/i);
+        const title = titleMatch?.[1] || nameMatch?.[1] || humanizeArtifactLabel(idMatch?.[1] || 'Artifact');
         const type = humanizeArtifactLabel(typeMatch?.[1] || 'artifact');
         return stash(`<section class="artifact-card">
             <div class="artifact-header">
@@ -440,7 +529,8 @@ function renderMarkdown(text: string): string {
     html = html.replace(/\[TOOL:\s*execute_command\s*({[\s\S]*?})\s*\]/gi, (_, payloadJson) => {
         try {
             const payload = JSON.parse(payloadJson);
-            const command = typeof payload.command === 'string' ? payload.command.trim() : payloadJson.trim();
+            const normalized = normalizeExecuteCommandPayload(payload, payloadJson);
+            const command = normalized?.commandText || payloadJson.trim();
             return stash(`<section class="message-block command-block">
                 <div class="command-header">
                     <span>Run In Terminal</span>
@@ -462,7 +552,8 @@ function renderMarkdown(text: string): string {
     html = html.replace(/\[TOOL:\s*send_keys\s*({[\s\S]*?})\s*\]/gi, (_, payloadJson) => {
         try {
             const payload = JSON.parse(payloadJson);
-            const keys = Array.isArray(payload.keys) ? JSON.stringify(payload.keys) : payloadJson.trim();
+            const normalized = normalizeSendKeysPayloadObject(payload, payloadJson);
+            const keys = normalized?.commandText || payloadJson.trim();
             return stash(`<section class="message-block command-block">
                 <div class="command-header">
                     <span>Send Keys</span>
@@ -526,8 +617,7 @@ function renderMarkdown(text: string): string {
         return stash(`<pre><code class="language-${escapeHtml(language || 'plain')}">${escapeHtml(code.trim())}</code></pre>`);
     });
 
-    html = html
-        .split(/\n{2,}/)
+    html = splitMarkdownBlocks(html)
         .map(block => renderTextBlock(block))
         .filter(Boolean)
         .join('');
@@ -649,9 +739,9 @@ type ParsedToolCall = {
 const TERMINAL_CONTEXT_CHAR_LIMIT = 4000;
 const TASK_MEMORY_REQUEST_LIMIT = 3;
 const TASK_MEMORY_PLAN_LIMIT = 6;
-const TASK_MEMORY_STEP_LIMIT = 8;
-const TASK_MEMORY_EVIDENCE_LIMIT = 4;
-const TASK_MEMORY_RECENT_MESSAGE_LIMIT = 8;
+const TASK_MEMORY_STEP_LIMIT = 6;
+const TASK_MEMORY_EVIDENCE_LIMIT = 2;
+const TASK_MEMORY_RECENT_MESSAGE_LIMIT = 6;
 
 type LLMProgressState = {
     phase: 'model-load' | 'prompt-processing';
@@ -736,6 +826,111 @@ const parseToolPayloadObject = (payload: string): Record<string, unknown> | null
     return null;
 };
 
+const normalizeWrappedString = (value: string): string => {
+    const trimmed = value.trim().replace(/(?:<<<|>>>)+\s*$/g, '').trim();
+    if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+        return trimmed.slice(1, -1).trim();
+    }
+    return trimmed;
+};
+
+const getFirstStringField = (payload: Record<string, unknown>, keys: string[]): string | null => {
+    for (const key of keys) {
+        const value = payload[key];
+        if (typeof value === 'string' && value.trim()) {
+            return normalizeWrappedString(value);
+        }
+    }
+    return null;
+};
+
+const getFirstStringArrayField = (payload: Record<string, unknown>, keys: string[]): string[] | null => {
+    for (const key of keys) {
+        const value = payload[key];
+        if (Array.isArray(value) && value.every((item) => typeof item === 'string' && item.trim())) {
+            return value.map((item) => normalizeWrappedString(item));
+        }
+    }
+    return null;
+};
+
+const normalizeExecuteCommandPayload = (payload: Record<string, unknown> | null, rawPayload?: string): { commandText: string; toolArgs: string } | null => {
+    if (payload) {
+        const command = getFirstStringField(payload, ['command', 'cmd', 'arg', 'args', 'text', 'value', 'input', 'shell_command', 'shell']);
+        if (command) {
+            return {
+                commandText: command,
+                toolArgs: JSON.stringify({ command }),
+            };
+        }
+
+        const commandParts = getFirstStringArrayField(payload, ['args', 'argv', 'command_parts']);
+        if (commandParts && commandParts.length > 0) {
+            const commandText = commandParts.join(' ');
+            return {
+                commandText,
+                toolArgs: JSON.stringify({ command: commandText }),
+            };
+        }
+
+        const stringEntries = Object.entries(payload).filter(([, value]) => typeof value === 'string' && value.trim());
+        if (stringEntries.length === 1) {
+            const commandText = normalizeWrappedString(String(stringEntries[0][1]));
+            return {
+                commandText,
+                toolArgs: JSON.stringify({ command: commandText }),
+            };
+        }
+    }
+
+    if (rawPayload) {
+        const normalized = normalizeWrappedString(rawPayload);
+        if (normalized && !normalized.startsWith('{')) {
+            return {
+                commandText: normalized,
+                toolArgs: JSON.stringify({ command: normalized }),
+            };
+        }
+    }
+
+    return null;
+};
+
+const normalizeSendKeysPayloadObject = (payload: Record<string, unknown> | null, rawPayload?: string): { parsedKeys: string[]; commandText: string; toolArgs: string } | null => {
+    if (payload) {
+        const keys = getFirstStringArrayField(payload, ['keys', 'buttons', 'sequence', 'values']);
+        if (keys && keys.length > 0) {
+            return {
+                parsedKeys: keys,
+                commandText: JSON.stringify(keys),
+                toolArgs: JSON.stringify({ keys }),
+            };
+        }
+
+        const singleKey = getFirstStringField(payload, ['key', 'arg', 'text', 'value']);
+        if (singleKey) {
+            return {
+                parsedKeys: [singleKey],
+                commandText: JSON.stringify([singleKey]),
+                toolArgs: JSON.stringify({ keys: [singleKey] }),
+            };
+        }
+    }
+
+    if (rawPayload) {
+        const parsedKeys = parseSendKeysPayload(rawPayload);
+        if (parsedKeys && parsedKeys.length > 0) {
+            return {
+                parsedKeys,
+                commandText: JSON.stringify(parsedKeys),
+                toolArgs: JSON.stringify({ keys: parsedKeys }),
+            };
+        }
+    }
+
+    return null;
+};
+
 const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const executeRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
     const forgivingExecuteRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)\s*<<</;
@@ -747,7 +942,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
 
     const commandMatch = response.match(executeRegex);
     if (commandMatch) {
-        const command = commandMatch[1];
+        const command = normalizeWrappedString(commandMatch[1]);
         return {
             raw: commandMatch[0],
             toolName: 'execute_command',
@@ -759,7 +954,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
 
     const forgivingCommandMatch = response.match(forgivingExecuteRegex);
     if (forgivingCommandMatch) {
-        const command = forgivingCommandMatch[1].trim().replace(/"$/, '');
+        const command = normalizeWrappedString(forgivingCommandMatch[1].replace(/"$/, ''));
         return {
             raw: forgivingCommandMatch[0],
             toolName: 'execute_command',
@@ -783,7 +978,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
 
     const bracketExecuteMatch = response.match(bracketExecuteRegex);
     if (bracketExecuteMatch) {
-        const command = bracketExecuteMatch[1];
+        const command = normalizeWrappedString(bracketExecuteMatch[1]);
         return {
             raw: bracketExecuteMatch[0],
             toolName: 'execute_command',
@@ -823,32 +1018,35 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     try {
         const toolName = bracketMatch[1].toLowerCase();
         const payload = parseToolPayloadObject(bracketMatch[2]);
-        if (!payload) {
-            return null;
-        }
-        if (toolName === 'execute_command' && typeof payload.command === 'string') {
+        if (toolName === 'execute_command') {
+            const normalized = normalizeExecuteCommandPayload(payload, bracketMatch[2]);
+            if (!normalized) return null;
             return {
                 raw: bracketMatch[0],
                 toolName,
-                commandText: payload.command,
+                commandText: normalized.commandText,
                 parsedKeys: [],
-                toolArgs: JSON.stringify({ command: payload.command }),
+                toolArgs: normalized.toolArgs,
             };
         }
 
-        if (toolName === 'send_keys' && Array.isArray(payload.keys) && payload.keys.every((item: unknown) => typeof item === 'string')) {
+        if (toolName === 'send_keys') {
+            const normalized = normalizeSendKeysPayloadObject(payload, bracketMatch[2]);
+            if (!normalized) return null;
             return {
                 raw: bracketMatch[0],
                 toolName,
-                commandText: JSON.stringify(payload.keys),
-                parsedKeys: payload.keys,
-                toolArgs: JSON.stringify({ keys: payload.keys }),
+                commandText: normalized.commandText,
+                parsedKeys: normalized.parsedKeys,
+                toolArgs: normalized.toolArgs,
             };
         }
 
         if (payload && typeof payload === 'object') {
             const summarizedArgument = typeof payload.query === 'string'
                 ? payload.query
+                : typeof payload.arg === 'string'
+                    ? payload.arg
                 : typeof payload.url === 'string'
                     ? payload.url
                     : typeof payload.keyword === 'string'
@@ -978,6 +1176,20 @@ const extractTagContents = (value: string, tagName: string): string[] => {
     return matches;
 };
 
+const dedupePreserveOrder = (values: string[]): string[] => {
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+
+    for (const value of values) {
+        const normalized = value.trim();
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        deduped.push(normalized);
+    }
+
+    return deduped;
+};
+
 const getMeaningfulUserHistory = (history: Message[]): Message[] => (
     history.filter(message => message.role === 'user' && message.content.trim() && !isSyntheticToolResponseContent(message.content))
 );
@@ -1007,10 +1219,13 @@ const summarizeToolContentForMemory = (message: Message): string => {
     const commandMatch = normalized.match(/Command:\s*`?([^`\n]+)`?/i);
     const statusMatch = normalized.match(/Status:\s*([\s\S]*)$/i);
     const commandText = commandMatch?.[1]?.trim();
-    const statusText = statusMatch ? clampText(stripMarkupForContext(statusMatch[1]), 180) : clampText(normalized, 180);
+    const statusText = statusMatch ? clampText(stripMarkupForContext(statusMatch[1]), 120) : clampText(normalized, 120);
     const toolName = message.name || 'tool';
 
     if (commandText) {
+        if (statusText === `Sent to terminal: ${commandText}`) {
+            return `${toolName}: ${commandText}`;
+        }
         return `${toolName}: ${commandText} -> ${statusText}`;
     }
 
@@ -1072,13 +1287,13 @@ const buildTaskMemory = (history: Message[]): TaskMemory => {
     const request = recentRequests[recentRequests.length - 1] || '';
 
     const planItems = collectPlanItems(history);
-    const stepResults = history
+    const stepResults = dedupePreserveOrder(history
         .filter(message => message.role === 'tool' || (message.role === 'assistant' && !parseToolCallFromResponse(message.content) && message.content.trim()))
         .map(summarizeMessageForMemory)
         .filter(Boolean)
-        .slice(-TASK_MEMORY_STEP_LIMIT);
+    ).slice(-TASK_MEMORY_STEP_LIMIT);
 
-    const latestEvidence = history
+    const latestEvidence = dedupePreserveOrder(history
         .filter(message => {
             if (message.role === 'tool') return true;
             if (message.role === 'user' && /\[Latest user request\]/.test(message.content)) return true;
@@ -1086,11 +1301,13 @@ const buildTaskMemory = (history: Message[]): TaskMemory => {
         })
         .map(summarizeMessageForMemory)
         .filter(Boolean)
-        .slice(-TASK_MEMORY_EVIDENCE_LIMIT);
+    ).slice(-TASK_MEMORY_EVIDENCE_LIMIT);
 
     const latestAssistant = [...history]
         .reverse()
         .find(message => message.role === 'assistant' && !parseToolCallFromResponse(message.content) && stripToolCallMarkup(message.content).trim());
+    const draftResponse = latestAssistant ? clampText(stripToolCallMarkup(stripMarkupForContext(latestAssistant.content)), 180) : '';
+    const finalDraftResponse = stepResults.includes(draftResponse) ? '' : draftResponse;
 
     return {
         request,
@@ -1099,7 +1316,7 @@ const buildTaskMemory = (history: Message[]): TaskMemory => {
         planItems,
         stepResults,
         latestEvidence,
-        draftResponse: latestAssistant ? clampText(stripToolCallMarkup(stripMarkupForContext(latestAssistant.content)), 240) : '',
+        draftResponse: finalDraftResponse,
     };
 };
 
@@ -1129,7 +1346,7 @@ const renderTaskMemory = (memory: TaskMemory): string => {
         sections.push(`DRAFT_RESPONSE:\n${memory.draftResponse}`);
     }
 
-    sections.push('Use TASK_MEMORY as the primary summary of prior work. Prefer it over replaying the full transcript, but verify with tools whenever the answer depends on system state or fresh output.');
+    sections.push('Use TASK_MEMORY as the main prior-state summary. Verify with tools for system facts or fresh output.');
 
     return sections.join('\n\n');
 };
@@ -1139,16 +1356,43 @@ const buildCompactHistory = (history: Message[]): Message[] => {
         .filter((message, index) => {
             if (index === 0 && message.role === 'assistant') return false;
             if (message.role === 'system' && /^🔧 Executing /.test(message.content.trim())) return false;
+            if (message.role === 'assistant' && !stripToolCallMarkup(stripMarkupForContext(message.content)).trim()) return false;
             return Boolean(message.content.trim());
         })
         .slice(-TASK_MEMORY_RECENT_MESSAGE_LIMIT)
         .map((message) => {
-            const maxLength = message.role === 'tool' ? 420 : message.role === 'assistant' ? 520 : 360;
+            const maxLength = message.role === 'tool' ? 220 : message.role === 'assistant' ? 240 : 180;
             return {
                 ...message,
                 content: clampTextFromEnd(message.content, maxLength),
             };
         });
+};
+
+const shouldAttachScreenContext = (history: Message[]): boolean => {
+    const latestUser = [...history]
+        .reverse()
+        .find(message => message.role === 'user' && message.content.trim() && !isSyntheticToolResponseContent(message.content));
+    const latestRequest = latestUser?.content || '';
+    if (SCREEN_CONTEXT_KEYWORDS.test(latestRequest)) return true;
+
+    const latestAssistant = [...history].reverse().find(message => message.role === 'assistant' && message.content.trim());
+    if (latestAssistant && parseToolCallFromResponse(latestAssistant.content)?.toolName === 'send_keys') {
+        return true;
+    }
+
+    return false;
+};
+
+const buildCompactVisibleChat = (history: Message[]): string => {
+    return history
+        .filter(message => !isSyntheticToolResponseContent(message.content))
+        .slice(-2)
+        .map(message => {
+            const roleLabel = message.role === 'user' ? 'U' : message.role === 'assistant' ? 'A' : message.role === 'tool' ? 'T' : 'S';
+            return `${roleLabel}: ${clampText(stripMarkupForContext(message.content) || '(empty)', 120)}`;
+        })
+        .join('\n');
 };
 
 const shouldUseComplexTaskMode = (request: string): boolean => {
@@ -2016,34 +2260,20 @@ ${t('greeting')}`
         recentTerminalBuffersRef.current[tabId] || t('terminalEmpty')
     );
 
-    const getCondensedVisibleTerminalText = (): string => {
-        const visible = compactTerminalContext(getVisibleTerminalText());
-        return clampTextFromEnd(visible, 1200);
-    };
-
     const shouldIncludeScreenContext = (history: Message[]): boolean => {
-        return history.length > 0;
+        return history.length > 0 && shouldAttachScreenContext(history);
     };
 
     const buildScreenContext = (history: Message[]): string => {
         const activeTab = tabs.find(tab => tab.id === activeTabId);
-        const visibleChat = history
-            .filter(message => !isSyntheticToolResponseContent(message.content))
-            .slice(-4)
-            .map(message => {
-                const roleLabel = message.role === 'user' ? 'User' : message.role === 'assistant' ? 'Assistant' : message.role;
-                return `${roleLabel}: ${clampText(stripMarkupForContext(message.content) || '(empty)', 240)}`;
-            })
-            .join('\n');
+        const visibleChat = buildCompactVisibleChat(history);
 
         return [
-            `ACTIVE_TAB: ${activeTab?.name || activeTabId}`,
-            `CHAT_WIDTH: ${chatWidth}px`,
-            'RECENT_TERMINAL_BUFFER:',
-            getRecentTerminalContextBuffer(activeTabId),
-            'VISIBLE_TERMINAL:',
-            getCondensedVisibleTerminalText(),
-            'VISIBLE_CHAT:',
+            `TAB: ${activeTab?.name || activeTabId}`,
+            `WIDTH: ${chatWidth}px`,
+            'TERMINAL:',
+            clampTextFromEnd(getRecentTerminalContextBuffer(activeTabId), 700),
+            'CHAT:',
             visibleChat || t('chatEmpty'),
         ].join('\n');
     };
@@ -2710,48 +2940,23 @@ ${t('greeting')}`
                 ? `
 
 5. GLOBAL USER PROMPT:
-Apply the following persistent user guidance unless it conflicts with safety policy, exact tool-call syntax, or the user's current request. Treat it as stable preference/context, not as a new task to execute by itself.
+Treat this as persistent user preference/context unless it conflicts with safety, exact tool syntax, or the current request.
 [BEGIN_GLOBAL_USER_PROMPT]
 ${trimmedGlobalUserPrompt}
 [END_GLOBAL_USER_PROMPT]`
                 : '';
 
             const baseSystemPrompt = `You are ${mcpLabel}, a professional AI engineer. 
-1. UI: Use <analysis>, <progress>, and <artifact> blocks when they add value. Keep answers compact and readable in a narrow side chat.
-2. SCREEN AWARENESS: You receive SCREEN_CONTEXT describing what is visible in the app right now. Use SCREEN_CONTEXT only when the task is specifically about what is visible on screen, terminal/editor UI state, or recent chat content. Do NOT use SCREEN_CONTEXT as proof for filesystem facts, file counts, command results, paths, or other verifiable system state when you can check them with tools. For counts, paths, file existence, file contents, process state, or command output, prefer tools first.
-3. TOOLS: To run a terminal command, YOU MUST output this EXACT line:
-   >>> EXECUTE_COMMAND: "YOUR_COMMAND" <<<
-   To send terminal key presses, YOU MUST output this EXACT line:
-   >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
-   To call any other MCP tool such as search_web, read_web_page, get_current_time, naver_search, or namu_wiki, YOU MUST output this EXACT format:
-   [TOOL: tool_name {"arg":"value"}]
-   Only use tools that are explicitly listed as available. Never invent tool names such as create_file, write_file, save_file, or edit_file.
-    
-Example: To check the home folder, output:
->>> EXECUTE_COMMAND: "cd ~ && ls" <<<
-Example: To exit vim without saving, output:
->>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
-Example: If ESC or normal quit keys do not return terminal control, output:
->>> SEND_KEYS: ["CTRL_C"] <<<
-Example: To search the web, output:
-[TOOL: search_web {"query":"Apple M4 Pro GPU benchmark"}]
-Example: To read a page, output:
-[TOOL: read_web_page {"url":"https://example.com"}]
-Example: To create a text file on Windows, output:
->>> EXECUTE_COMMAND: "Set-Content -Path 'note.txt' -Value 'hello'" <<<
-
-ALWAYS use the tool when the user asks for terminal actions.
-If the user asks for latest web information, website verification, or online reading, use search_web and read_web_page instead of saying web browsing is unavailable.
-If the user asks to count files, inspect directories, verify paths, read files, or confirm system state, use terminal commands even if something similar is visible in SCREEN_CONTEXT.
-Before answering, classify the request by meaning rather than surface keywords:
-- Treat it as a complex task when it needs multiple steps, implementation, investigation, refactoring, review, or a concrete execution plan.
-- Treat it as requiring tools when the answer depends on checking files, directories, paths, terminal output, processes, versions, command results, or other system state.
-- Treat it as requiring screen context when the user refers to the current UI, visible terminal state, recent on-screen output, or ambiguous references such as "this", "that", or "why is it like this".
-These judgments must work regardless of whether the user writes in Korean, English, Japanese, Chinese, or another language.
-If terminal control appears stuck inside an interactive program and ESC, :q, exit, or other normal quit sequences do not restore the shell prompt, send CTRL_C to interrupt the program and recover the terminal prompt. This also applies on macOS terminals: use CTRL_C, not CMD_C.
-When Current OS indicates Windows, assume the terminal shell is PowerShell. Use PowerShell syntax only. Do not use cmd.exe or batch syntax such as \`if exist\`, \`dir /b\`, \`copy\`, \`del\`, \`type\`, \`set VAR=\`, or \`%VAR%\`.
-If the user asks to create, overwrite, append, rename, move, or delete files on Windows, do it with PowerShell commands through EXECUTE_COMMAND, not with a file tool.
-4. STYLE: Aim for a VS Code / Antigravity side-panel tone with minimal vertical waste.${buildTaskWorkflowPrompt(complexRequest)}
+1. Keep answers compact for a narrow side chat. Use <analysis>, <progress>, and <artifact> only when helpful.
+2. SCREEN_CONTEXT is only for visible UI/terminal/chat state. Do not use it as proof for files, paths, counts, command output, or other verifiable system facts when tools can check them.
+3. Tool syntax is strict:
+   - Terminal command: >>> EXECUTE_COMMAND: "YOUR_COMMAND" <<<
+   - Terminal keys: >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
+   - Other tools: [TOOL: tool_name {"arg":"value"}]
+   Use only listed tools. Never invent file-edit tools.
+4. Use tools for terminal actions, system checks, files/paths, command results, latest web info, or page verification.
+5. Judge requests by meaning, not keywords, across all user languages.
+6. If terminal control is stuck in an interactive program, recover with CTRL_C on macOS. If OS is Windows, use PowerShell syntax only.${buildTaskWorkflowPrompt(complexRequest)}
 Current OS: ${window.navigator.platform}
 Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserPromptSection}`;
 
