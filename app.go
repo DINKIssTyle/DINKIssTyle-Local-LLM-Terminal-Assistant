@@ -20,10 +20,37 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+var verboseLoggingEnabled atomic.Uint32
+
+func setVerboseLoggingEnabled(enabled bool) {
+	if enabled {
+		verboseLoggingEnabled.Store(1)
+		return
+	}
+	verboseLoggingEnabled.Store(0)
+}
+
+func isVerboseLoggingEnabled() bool {
+	return verboseLoggingEnabled.Load() == 1
+}
+
+func logVerbosef(format string, args ...interface{}) {
+	if isVerboseLoggingEnabled() {
+		log.Printf(format, args...)
+	}
+}
+
+func logVerboseln(args ...interface{}) {
+	if isVerboseLoggingEnabled() {
+		log.Println(args...)
+	}
+}
 
 func normalizeShortcutTokens(keys []string) []string {
 	normalized := make([]string, 0, len(keys))
@@ -772,9 +799,11 @@ func (a *App) ClearTerminalContext(id string) error {
 }
 
 // UpdateMCPSettings updates the internal MCP server configuration
-func (a *App) UpdateMCPSettings(port int, label string) {
+func (a *App) UpdateMCPSettings(port int, label string, debugEnabled bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	setVerboseLoggingEnabled(debugEnabled)
+	mcp.SetVerboseLoggingEnabled(debugEnabled)
 
 	if a.mcpPort != port || a.mcpServer == nil {
 		if port > 0 {
@@ -787,7 +816,7 @@ func (a *App) UpdateMCPSettings(port int, label string) {
 		}
 	}
 	a.mcpLabel = label
-	log.Printf("[App] MCP Settings updated: Port=%d, Label=%s", port, label)
+	logVerbosef("[App] MCP Settings updated: Port=%d, Label=%s", port, label)
 }
 
 func (a *App) handleMCPServerStart() {
@@ -814,13 +843,13 @@ func (a *App) StopLLMResponse() {
 	if a.cancelFunc != nil {
 		a.cancelFunc()
 		a.cancelFunc = nil
-		log.Println("[App] LLM Response stopped by user")
+		logVerboseln("[App] LLM Response stopped by user")
 	}
 }
 
 // FetchLLMResponse makes a call to the local or remote LLM API
 func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, maxTokens int, temperature float64, provider string, isStreaming bool, messages []interface{}) (string, error) {
-	log.Printf("[LLM] Fetching response from %s (Model: %s, Streaming: %v)", apiURL, modelName, isStreaming)
+	logVerbosef("[LLM] Fetching response from %s (Model: %s, Streaming: %v)", apiURL, modelName, isStreaming)
 	// Cancel any existing request before starting a new one
 	a.StopLLMResponse()
 
@@ -872,17 +901,17 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		return "", err
 	}
 	defer resp.Body.Close()
-	log.Printf("[LLM] Received response status: %s", resp.Status)
+	logVerbosef("[LLM] Received response status: %s", resp.Status)
 
 	if isStreaming {
 		scanner := bufio.NewScanner(resp.Body)
 		fullContent := ""
 		currentEventType := ""
 		lastStreamError := ""
-		log.Printf("[LLM] Starting SSE stream scanner...")
+		logVerbosef("[LLM] Starting SSE stream scanner...")
 		for scanner.Scan() {
 			line := scanner.Text()
-			log.Printf("[LLM] RAW LINE: %s", line)
+			logVerbosef("[LLM] RAW LINE: %s", line)
 
 			if line == "" {
 				continue
@@ -899,7 +928,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
-				log.Printf("[LLM] Stream received [DONE]")
+				logVerbosef("[LLM] Stream received [DONE]")
 				emitLLMProgress(a.ctx, "", "", 100, false)
 				break
 			}
@@ -946,7 +975,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 					case "error":
 						if streamError := readLMStudioStreamError(eventData); streamError != "" {
 							lastStreamError = streamError
-							log.Printf("[LLM] Stream error event: %s", streamError)
+							logVerbosef("[LLM] Stream error event: %s", streamError)
 						}
 						currentEventType = ""
 						continue
@@ -977,7 +1006,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 			}
 
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				log.Printf("[LLM] JSON Parse Error: %v | Data: %s", err, data)
+				logVerbosef("[LLM] JSON Parse Error: %v | Data: %s", err, data)
 				continue
 			}
 
@@ -996,7 +1025,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		if err := scanner.Err(); err != nil {
 			log.Printf("[LLM] Scanner error: %v", err)
 		}
-		log.Printf("[LLM] Stream complete. Total length: %d", len(fullContent))
+		logVerbosef("[LLM] Stream complete. Total length: %d", len(fullContent))
 		emitLLMProgress(a.ctx, "", "", 100, false)
 		if strings.TrimSpace(fullContent) == "" && lastStreamError != "" {
 			return "", fmt.Errorf("LM Studio stream error: %s", lastStreamError)
@@ -1040,7 +1069,7 @@ func (a *App) FetchAvailableModels(apiURL string, apiKey string) ([]string, erro
 	var lastErr error
 
 	for _, modelsURL := range modelEndpoints {
-		log.Printf("[App] Fetching models from: %s", modelsURL)
+		logVerbosef("[App] Fetching models from: %s", modelsURL)
 
 		req, err := http.NewRequest("GET", modelsURL, nil)
 		if err != nil {
@@ -1089,7 +1118,7 @@ func (a *App) FetchAvailableModels(apiURL string, apiKey string) ([]string, erro
 			models = append(models, m.ID)
 		}
 
-		log.Printf("[App] Successfully fetched %d models from %s", len(models), modelsURL)
+		logVerbosef("[App] Successfully fetched %d models from %s", len(models), modelsURL)
 		return models, nil
 	}
 
@@ -1106,7 +1135,7 @@ func (a *App) LoadModel(apiURL string, apiKey string, modelID string) error {
 	endpoint = strings.TrimSuffix(endpoint, "/v1")
 	loadURL := endpoint + "/v1/models/load"
 
-	log.Printf("[App] Requesting load for model: %s to %s", modelID, loadURL)
+	logVerbosef("[App] Requesting load for model: %s to %s", modelID, loadURL)
 
 	payload := map[string]interface{}{
 		"model": modelID,
@@ -1135,7 +1164,7 @@ func (a *App) LoadModel(apiURL string, apiKey string, modelID string) error {
 		return fmt.Errorf("server returned HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	log.Printf("[App] Successfully loaded model: %s", modelID)
+	logVerbosef("[App] Successfully loaded model: %s", modelID)
 	return nil
 }
 

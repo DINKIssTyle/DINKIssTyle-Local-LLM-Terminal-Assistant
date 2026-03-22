@@ -1742,7 +1742,7 @@ function App() {
         setMaxTokensInput(String(resolvedMaxTokens));
         setMcpPortInput(String(resolvedMcpPort));
 
-        UpdateMCPSettings(resolvedMcpPort, mcpLabel);
+        UpdateMCPSettings(resolvedMcpPort, mcpLabel, debugPanelEnabled);
         setIsSettingsOpen(false);
         setIsMcpDocsOpen(false);
     };
@@ -1756,7 +1756,7 @@ function App() {
     }, [mcpPort]);
 
     useEffect(() => {
-        UpdateMCPSettings(mcpPort, mcpLabel).catch((error) => {
+        UpdateMCPSettings(mcpPort, mcpLabel, debugPanelEnabled).catch((error) => {
             console.error('[MCP] Failed to apply persisted MCP settings on startup:', error);
         });
     }, []);

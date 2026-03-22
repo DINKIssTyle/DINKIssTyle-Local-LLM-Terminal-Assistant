@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync/atomic"
 )
 
 // TerminalExecutor is a callback function that writes to the terminal.
@@ -16,6 +17,21 @@ import (
 var TerminalExecutor func(command string) (string, error)
 var TerminalKeyExecutor func(keys []string) (string, error)
 var TerminalTailReader func(lines int, maxWaitMs int, idleMs int) (string, error)
+var verboseLoggingEnabled atomic.Uint32
+
+func SetVerboseLoggingEnabled(enabled bool) {
+	if enabled {
+		verboseLoggingEnabled.Store(1)
+		return
+	}
+	verboseLoggingEnabled.Store(0)
+}
+
+func logVerbosef(format string, args ...interface{}) {
+	if verboseLoggingEnabled.Load() == 1 {
+		log.Printf(format, args...)
+	}
+}
 
 type Tool struct {
 	Name        string      `json:"name"`
@@ -124,7 +140,7 @@ func GetToolList() []Tool {
 }
 
 func ExecuteToolByName(toolName string, argumentsJSON string) (string, error) {
-	log.Printf("[MCP] ExecuteToolByName: %s", toolName)
+	logVerbosef("[MCP] ExecuteToolByName: %s", toolName)
 
 	switch toolName {
 	case "search_web":

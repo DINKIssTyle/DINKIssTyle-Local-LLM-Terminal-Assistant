@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -30,7 +29,7 @@ func GetCurrentTime() (string, error) {
 
 // SearchWeb performs a search using DuckDuckGo Lite and returns a summary.
 func SearchWeb(query string) (string, error) {
-	log.Printf("[MCP] Searching Web for: %s", query)
+	logVerbosef("[MCP] Searching Web for: %s", query)
 
 	searchURL := fmt.Sprintf("https://lite.duckduckgo.com/lite/?q=%s", url.QueryEscape(query))
 
@@ -104,7 +103,7 @@ func SearchNaver(query string) (string, error) {
 
 // ReadPage fetches the text content of a URL using a headless browser.
 func ReadPage(pageURL string) (string, error) {
-	log.Printf("[MCP] Reading Page: %s", pageURL)
+	logVerbosef("[MCP] Reading Page: %s", pageURL)
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
@@ -152,7 +151,7 @@ func ReadPage(pageURL string) (string, error) {
 
 // ExecuteCommand runs a shell command.
 func ExecuteCommand(command string) (string, error) {
-	log.Printf("[MCP] ExecuteCommand: %s", command)
+	logVerbosef("[MCP] ExecuteCommand: %s", command)
 
 	if TerminalExecutor != nil {
 		return TerminalExecutor(command)

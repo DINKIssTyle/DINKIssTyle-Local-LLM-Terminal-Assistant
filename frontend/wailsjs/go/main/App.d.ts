@@ -30,6 +30,6 @@ export function StopLLMResponse():Promise<void>;
 
 export function StopTerminal(arg1:string):Promise<void>;
 
-export function UpdateMCPSettings(arg1:number,arg2:string):Promise<void>;
+export function UpdateMCPSettings(arg1:number,arg2:string,arg3:boolean):Promise<void>;
 
 export function WriteToTerminal(arg1:string,arg2:string):Promise<void>;

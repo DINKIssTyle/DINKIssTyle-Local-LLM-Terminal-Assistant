@@ -68,7 +68,7 @@ func (s *MCPServer) broadcast(payload string) int {
 		case ch <- payload:
 			count++
 		default:
-			log.Printf("[MCP Server] Broadcast skipped for a slow client")
+			logVerbosef("[MCP Server] Broadcast skipped for a slow client")
 		}
 	}
 	return count
@@ -92,7 +92,7 @@ func (s *MCPServer) Start(port int) {
 	s.mu.Unlock()
 
 	go func() {
-		log.Printf("[MCP Server] Listening on port %d", port)
+		logVerbosef("[MCP Server] Listening on port %d", port)
 		if err := http.Serve(ln, mux); err != nil {
 			log.Printf("[MCP Server] HTTP Serve error: %v", err)
 		}
@@ -162,7 +162,7 @@ func (s *MCPServer) buildResponse(req *mcpJSONRPCRequest) *mcpJSONRPCResponse {
 }
 
 func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[MCP-DEBUG] HandleSSE (SSE Open) from %s Method=%s", r.RemoteAddr, r.Method)
+	logVerbosef("[MCP-DEBUG] HandleSSE (SSE Open) from %s Method=%s", r.RemoteAddr, r.Method)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -180,7 +180,7 @@ func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			var req mcpJSONRPCRequest
 			if err := json.Unmarshal(bodyBytes, &req); err == nil {
 				initialReq = &req
-				log.Printf("[MCP Server] Captured Initial POST: %s", req.Method)
+				logVerbosef("[MCP Server] Captured Initial POST: %s", req.Method)
 			}
 		}
 		r.Body.Close()
@@ -210,7 +210,7 @@ func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointURL)
 	flusher.Flush()
-	log.Printf("[MCP-DEBUG] Advertised Endpoint: %s", endpointURL)
+	logVerbosef("[MCP-DEBUG] Advertised Endpoint: %s", endpointURL)
 
 	if initialReq != nil {
 		res := s.buildResponse(initialReq)
@@ -218,10 +218,10 @@ func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			respBytes, _ := json.Marshal(res)
 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(respBytes))
 			flusher.Flush()
-			log.Printf("[MCP-DEBUG] Inline Response sent for %s", initialReq.Method)
+			logVerbosef("[MCP-DEBUG] Inline Response sent for %s", initialReq.Method)
 
 			if initialReq.Method != "initialize" {
-				log.Printf("[MCP-DEBUG] Short-circuiting POST request for %s", initialReq.Method)
+				logVerbosef("[MCP-DEBUG] Short-circuiting POST request for %s", initialReq.Method)
 				return
 			}
 		}
@@ -239,14 +239,14 @@ func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, ": keepalive\n\n")
 			flusher.Flush()
 		case <-r.Context().Done():
-			log.Printf("[MCP Server] SSE Client Disconnected: %s", r.RemoteAddr)
+			logVerbosef("[MCP Server] SSE Client Disconnected: %s", r.RemoteAddr)
 			return
 		}
 	}
 }
 
 func (s *MCPServer) handleMessage(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[MCP-DEBUG] HandleMessages (POST) from %s", r.RemoteAddr)
+	logVerbosef("[MCP-DEBUG] HandleMessages (POST) from %s", r.RemoteAddr)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -276,7 +276,7 @@ func (s *MCPServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[MCP Server] Received Request: %s (ID: %v)", req.Method, req.ID)
+	logVerbosef("[MCP Server] Received Request: %s (ID: %v)", req.Method, req.ID)
 
 	w.WriteHeader(http.StatusAccepted)
 
@@ -286,7 +286,7 @@ func (s *MCPServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		if res != nil {
 			respBytes, _ := json.Marshal(res)
 			count := s.broadcast(string(respBytes))
-			log.Printf("[MCP Server] Broadcasted %s to %d clients", req.Method, count)
+			logVerbosef("[MCP Server] Broadcasted %s to %d clients", req.Method, count)
 		}
 	}()
 }

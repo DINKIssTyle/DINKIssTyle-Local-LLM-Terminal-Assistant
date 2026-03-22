@@ -58,8 +58,8 @@ export function StopTerminal(arg1) {
   return window['go']['main']['App']['StopTerminal'](arg1);
 }
 
-export function UpdateMCPSettings(arg1, arg2) {
-  return window['go']['main']['App']['UpdateMCPSettings'](arg1, arg2);
+export function UpdateMCPSettings(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UpdateMCPSettings'](arg1, arg2, arg3);
 }
 
 export function WriteToTerminal(arg1, arg2) {
