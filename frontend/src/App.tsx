@@ -397,6 +397,16 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
+    html = html.replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)\s*<<</g, (_, command) => {
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>Run In Terminal</span>
+                <span class="progress-meta">Action</span>
+            </div>
+            <div class="command-body"><code>${escapeHtml(command.trim())}</code></div>
+        </section>`);
+    });
+
     html = html.replace(/(?:>>>|<<<)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</g, (_, keysJson) => {
         return stash(`<section class="message-block command-block">
             <div class="command-header">
@@ -713,6 +723,7 @@ const parseToolPayloadObject = (payload: string): Record<string, unknown> | null
 
 const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const executeRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
+    const forgivingExecuteRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)\s*<<</;
     const sendKeysRegex = /(?:>>>|<<<)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
     const bracketExecuteRegex = /\[EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*\]/i;
     const bracketSendKeysRegex = /\[SEND_KEYS:\s*(\[[\s\S]*?\])\s*\]/i;
@@ -724,6 +735,18 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         const command = commandMatch[1];
         return {
             raw: commandMatch[0],
+            toolName: 'execute_command',
+            commandText: command,
+            parsedKeys: [],
+            toolArgs: JSON.stringify({ command }),
+        };
+    }
+
+    const forgivingCommandMatch = response.match(forgivingExecuteRegex);
+    if (forgivingCommandMatch) {
+        const command = forgivingCommandMatch[1].trim().replace(/"$/, '');
+        return {
+            raw: forgivingCommandMatch[0],
             toolName: 'execute_command',
             commandText: command,
             parsedKeys: [],
@@ -778,7 +801,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
             toolName,
             commandText: '',
             parsedKeys: [],
-            toolArgs: '',
+            toolArgs: '{}',
         };
     }
 
@@ -2132,7 +2155,7 @@ ${t('greeting')}`
 
         let timeoutHandle: number | null = null;
         try {
-            const parsedArgs = JSON.parse(toolArgs);
+            const parsedArgs = toolArgs.trim() ? JSON.parse(toolArgs) : {};
             const result = await Promise.race([
                 (toolName === 'send_keys'
                         ? (async () => handleAppLevelSendKeys(parsedArgs.keys) ?? CallTool(toolName, toolArgs))()
@@ -2930,6 +2953,22 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
         resetInFlightUiState();
     };
 
+    useEffect(() => {
+        if (!isLoading) return;
+
+        const handleGlobalStopKey = (event: KeyboardEvent) => {
+            if (event.key !== 'Escape') return;
+            const activeElement = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+            const activeValue = typeof activeElement?.value === 'string' ? activeElement.value : '';
+            if (activeValue.trim().length > 0) return;
+            event.preventDefault();
+            void handleStop();
+        };
+
+        window.addEventListener('keydown', handleGlobalStopKey);
+        return () => window.removeEventListener('keydown', handleGlobalStopKey);
+    }, [isLoading]);
+
     const clearMessages = async () => {
         requestSequenceRef.current += 1;
         await StopLLMResponse();
@@ -3090,7 +3129,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                             <textarea
                                 ref={chatInputRef}
                                 className="chat-input"
-                                placeholder={t('chatPlaceholder')}
+                                placeholder={isLoading ? t('chatLoadingPlaceholder') : t('chatPlaceholder')}
                                 value={inputText}
                                 onChange={e => setInputText(e.target.value)}
                                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
