@@ -11,7 +11,7 @@ import './App.css';
 import mcpDocsContent from './assets/docs/mcp.md?raw';
 import { getTranslation, Language } from './i18n/translations';
 import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
-import { EventsOn, EventsEmit } from "../wailsjs/runtime/runtime";
+import { EventsOn, EventsEmit, WindowFullscreen, WindowIsFullscreen, WindowUnfullscreen } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
     return text
@@ -1797,6 +1797,7 @@ ${t('greeting')}`
     const [llmProgress, setLlmProgress] = useState<LLMProgressState | null>(null);
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [isFetchingModels, setIsFetchingModels] = useState(false);
+    const [isFullscreen, setIsFullscreen] = useState(false);
     const messagesRef = useRef<Message[]>(messages);
     const currentThinkingRef = useRef('');
     const currentReasoningStartedAtRef = useRef<number | null>(null);
@@ -1891,6 +1892,13 @@ ${t('greeting')}`
         };
 
         const handleAppShortcuts = (event: KeyboardEvent) => {
+            const isFullscreenShortcut = event.key === 'F11' || ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'f');
+            if (isFullscreenShortcut) {
+                event.preventDefault();
+                void handleToggleFullscreen();
+                return;
+            }
+
             const normalizedKeys = [
                 event.metaKey ? 'CMD' : '',
                 event.ctrlKey ? 'CTRL' : '',
@@ -2188,8 +2196,28 @@ ${t('greeting')}`
         GetTools().then(setAvailableTools);
     }, []);
 
+    useEffect(() => {
+        WindowIsFullscreen()
+            .then(setIsFullscreen)
+            .catch(() => setIsFullscreen(false));
+    }, []);
+
     const addTab = () => {
         openNewTab();
+    };
+
+    const handleToggleFullscreen = async () => {
+        try {
+            const nextState = !(await WindowIsFullscreen());
+            if (nextState) {
+                WindowFullscreen();
+            } else {
+                WindowUnfullscreen();
+            }
+            setIsFullscreen(nextState);
+        } catch (error) {
+            console.warn('[Window] Failed to toggle fullscreen:', error);
+        }
     };
 
     const removeTabById = (id: string) => {
@@ -3417,15 +3445,36 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                     <div className="pane-header">
                         <div className="tab-list">
                             {tabs.map(tab => (
-                                <div key={tab.id} className={`tab-item ${activeTabId === tab.id ? 'active' : ''}`} onClick={() => setActiveTabId(tab.id)}>
+                                <div key={tab.id} className={`tab-item no-select ${activeTabId === tab.id ? 'active' : ''}`} onClick={() => setActiveTabId(tab.id)}>
                                     {tab.name}
                                     {tabs.length > 1 && <span className="close-tab" onClick={(e) => removeTab(e, tab.id)}>×</span>}
                                 </div>
                             ))}
-                            <button className="add-tab-btn" onClick={addTab} title="New Tab">+</button>
+                            <button className="add-tab-btn no-select" onClick={addTab} title="New Tab">+</button>
                         </div>
                         <div className="header-actions">
-                            <button className="icon-btn" title="Settings" onClick={() => {
+                            <button className="icon-btn no-select" title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"} onClick={handleToggleFullscreen}>
+                                {isFullscreen ? (
+                                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none">
+                                        <path d="M9 15H5v4"></path>
+                                        <path d="M15 9h4V5"></path>
+                                        <path d="M5 15l5-5"></path>
+                                        <path d="M19 9l-5 5"></path>
+                                    </svg>
+                                ) : (
+                                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none">
+                                        <path d="M8 3H3v5"></path>
+                                        <path d="M16 3h5v5"></path>
+                                        <path d="M3 16v5h5"></path>
+                                        <path d="M21 16v5h-5"></path>
+                                        <path d="M3 8l6-6"></path>
+                                        <path d="M21 8l-6-6"></path>
+                                        <path d="M3 16l6 6"></path>
+                                        <path d="M21 16l-6 6"></path>
+                                    </svg>
+                                )}
+                            </button>
+                            <button className="icon-btn no-select" title="Settings" onClick={() => {
                                 setIsSettingsOpen(true);
                                 if (provider === 'LM Studio' && availableModels.length === 0) {
                                     handleFetchModels();
@@ -3451,11 +3500,11 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         </div>
                         {debugPanelEnabled && (
                             <aside className="debug-panel">
-                                <div className="debug-panel-header">
+                                <div className="debug-panel-header no-select">
                                     <span>Debug Trace</span>
                                     <span className="debug-panel-meta">{debugTrace.updatedAt ? new Date(debugTrace.updatedAt).toLocaleTimeString() : 'idle'}</span>
                                 </div>
-                                <div className="debug-tab-row">
+                                <div className="debug-tab-row no-select">
                                     {([
                                         ['context', 'Context'],
                                         ['request', 'LLM Request'],
@@ -3465,7 +3514,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                     ] as Array<[DebugPanelTab, string]>).map(([tabId, label]) => (
                                         <button
                                             key={tabId}
-                                            className={`debug-tab-btn ${debugPanelTab === tabId ? 'active' : ''}`}
+                                            className={`debug-tab-btn no-select ${debugPanelTab === tabId ? 'active' : ''}`}
                                             onClick={() => setDebugPanelTab(tabId)}
                                         >
                                             {label}
@@ -3484,9 +3533,9 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
 
                 <div className="chat-pane" style={{ width: `${chatWidth}px` }}>
                     <div className="pane-header">
-                        <div className="header-title">Assistant</div>
+                        <div className="header-title no-select">Assistant</div>
                         <div className="header-actions">
-                            <button className="icon-btn" title="Clear History" onClick={clearMessages}>
+                            <button className="icon-btn no-select" title="Clear History" onClick={clearMessages}>
                                 <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
                             </button>
                         </div>
@@ -3495,7 +3544,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         <div className="message-list">
                             {messages.map((m, i) => (
                                 <div key={i} className={`message ${m.role}`}>
-                                    <div className="message-label">
+                                    <div className="message-label no-select">
                                         {m.role === 'user' ? 'YOU' : m.role === 'tool' ? 'TOOL' : m.role === 'system' ? 'SYSTEM' : ASSISTANT_DISPLAY_NAME.toUpperCase()}
                                     </div>
                                     {m.role === 'assistant' && (
@@ -3752,12 +3801,16 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                                     <div className="settings-grid">
                                         <div className="settings-field full">
                                             <label className="settings-checkbox-row">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={debugPanelEnabled}
-                                                    onChange={e => setDebugPanelEnabled(e.target.checked)}
-                                                />
-                                                <span>Show debug side panel inside the terminal area</span>
+                                                <span className="settings-checkbox-control">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={debugPanelEnabled}
+                                                        onChange={e => setDebugPanelEnabled(e.target.checked)}
+                                                    />
+                                                </span>
+                                                <span className="settings-checkbox-copy">
+                                                    <span className="settings-checkbox-title">Show debug side panel inside the terminal area</span>
+                                                </span>
                                             </label>
                                             <span className="settings-hint">Displays the final screen context, LLM request payload, raw LLM response, parsed tool calls, tool execution results, and terminal follow-up notes.</span>
                                         </div>

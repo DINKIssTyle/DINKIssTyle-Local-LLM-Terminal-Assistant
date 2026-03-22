@@ -32,6 +32,11 @@ body,
     box-sizing: border-box;
 }
 
+.no-select {
+    user-select: none;
+    -webkit-user-select: none;
+}
+
 button,
 input,
 textarea,
@@ -1123,16 +1128,39 @@ select {
 }
 
 .settings-checkbox-row {
-    display: flex !important;
-    align-items: center;
-    gap: 10px;
+    display: grid !important;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: 12px;
     margin-bottom: 0 !important;
     cursor: pointer;
+    width: 100%;
 }
 
 .settings-checkbox-row input {
     width: auto;
     margin: 0;
+}
+
+.settings-checkbox-control {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 18px;
+    padding-top: 1px;
+}
+
+.settings-checkbox-copy {
+    display: flex;
+    min-width: 0;
+}
+
+.settings-checkbox-title {
+    display: block;
+    color: var(--text-color);
+    font-size: 13px;
+    line-height: 1.4;
+    word-break: keep-all;
 }
 
 .settings-hint {
@@ -1165,6 +1193,17 @@ select {
     background: #0a0f14;
     color: var(--text-color);
     font-size: 13px;
+}
+
+.settings-checkbox-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    padding: 0;
+    flex: 0 0 18px;
+    accent-color: var(--accent-color);
+    appearance: auto;
+    -webkit-appearance: checkbox;
 }
 
 .settings-textarea {
