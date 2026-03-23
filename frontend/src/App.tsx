@@ -509,6 +509,52 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
+    html = html.replace(/(?:>>>|<<<)\s*([A-Z0-9_:-]+)\s*:\s*({[\s\S]*?})\s*<<</gi, (_, toolName, payloadJson) => {
+        const normalizedToolName = String(toolName || '').trim().toLowerCase();
+        if (!normalizedToolName || normalizedToolName === 'execute_command' || normalizedToolName === 'send_keys') {
+            return _;
+        }
+
+        let displayValue = payloadJson.trim();
+        try {
+            const payload = parseToolPayloadObject(payloadJson);
+            displayValue = summarizeGenericToolPayload(payload, payloadJson);
+        } catch {
+            // noop
+        }
+
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>${escapeHtml(normalizedToolName.replace(/_/g, ' '))}</span>
+                <span class="progress-meta">Tool</span>
+            </div>
+            <div class="command-body"><code>${escapeHtml(displayValue)}</code></div>
+        </section>`);
+    });
+
+    html = html.replace(/<([a-zA-Z0-9_:-]+)>\s*({[\s\S]*?})\s*<\/\1>/g, (_, toolName, payloadJson) => {
+        const normalizedToolName = String(toolName || '').trim().toLowerCase();
+        if (!normalizedToolName || normalizedToolName === 'execution' || normalizedToolName === 'artifact') {
+            return _;
+        }
+
+        let displayValue = payloadJson.trim();
+        try {
+            const payload = parseToolPayloadObject(payloadJson);
+            displayValue = summarizeGenericToolPayload(payload, payloadJson);
+        } catch {
+            // noop
+        }
+
+        return stash(`<section class="message-block command-block">
+            <div class="command-header">
+                <span>${escapeHtml(normalizedToolName.replace(/_/g, ' '))}</span>
+                <span class="progress-meta">Tool</span>
+            </div>
+            <div class="command-body"><code>${escapeHtml(displayValue)}</code></div>
+        </section>`);
+    });
+
     html = html.replace(/\[EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*\]/gi, (_, command) => {
         return stash(`<section class="message-block command-block">
             <div class="command-header">
@@ -934,14 +980,40 @@ const normalizeSendKeysPayloadObject = (payload: Record<string, unknown> | null,
     return null;
 };
 
+const summarizeGenericToolPayload = (payload: Record<string, unknown> | null, rawPayload: string): string => {
+    if (payload && typeof payload === 'object') {
+        if (typeof payload.query === 'string') return payload.query;
+        if (typeof payload.url === 'string') return payload.url;
+        if (typeof payload.keyword === 'string') return payload.keyword;
+        if (typeof payload.command === 'string') return payload.command;
+        if (typeof payload.arg === 'string') return payload.arg;
+        if (typeof payload.text === 'string') return payload.text;
+        return JSON.stringify(payload);
+    }
+
+    return rawPayload.trim();
+};
+
 const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const executeRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
     const forgivingExecuteRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)\s*<<</;
     const sendKeysRegex = /(?:>>>|<<<)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
+    const genericAngleToolRegex = /(?:>>>|<<<)\s*([A-Z0-9_:-]+)\s*:\s*({[\s\S]*?})\s*<<</i;
+    const xmlToolRegex = /<([a-zA-Z0-9_:-]+)>\s*({[\s\S]*?})\s*<\/\1>/i;
+
+    // XML-style bare content: <execute_command>cmd text</execute_command>
+    const xmlExecuteCommandRegex = /<execute_command>\s*([\s\S]*?)\s*<\/execute_command>/i;
+    const xmlSendKeysRegex = /<send_keys>\s*(\[[\s\S]*?\])\s*<\/send_keys>/i;
+    const xmlBareToolRegex = /<([a-zA-Z0-9_:-]+)>\s*([\s\S]*?)\s*<\/\1>/i;
     const bracketExecuteRegex = /\[EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*\]/i;
     const bracketSendKeysRegex = /\[SEND_KEYS:\s*(\[[\s\S]*?\])\s*\]/i;
     const bracketToolRegex = /\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*({[\s\S]*?})\s*\]/i;
     const bracketToolNoArgsRegex = /\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*\]/i;
+
+    // Bare fallback patterns: no >>> <<< or [] delimiters
+    const bareExecuteRegex = /(?:^|\n)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*(?:\n|$)/i;
+    const bareSendKeysRegex = /(?:^|\n)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*(?:\n|$)/i;
+    const bareGenericToolRegex = /(?:^|\n)\s*([A-Z][A-Z0-9_]+)\s*:\s*({[\s\S]*?})\s*(?:\n|$)/;
 
     const commandMatch = response.match(executeRegex);
     if (commandMatch) {
@@ -1003,6 +1075,125 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         };
     }
 
+    // --- Bare fallback (no delimiters) ---
+    const bareExecuteMatch = response.match(bareExecuteRegex);
+    if (bareExecuteMatch) {
+        const command = normalizeWrappedString(bareExecuteMatch[1]);
+        return {
+            raw: bareExecuteMatch[0],
+            toolName: 'execute_command',
+            commandText: command,
+            parsedKeys: [],
+            toolArgs: JSON.stringify({ command }),
+        };
+    }
+
+    const bareSendKeysMatch = response.match(bareSendKeysRegex);
+    if (bareSendKeysMatch) {
+        const parsedKeys = parseSendKeysPayload(bareSendKeysMatch[1]) || [];
+        return {
+            raw: bareSendKeysMatch[0],
+            toolName: 'send_keys',
+            commandText: bareSendKeysMatch[1],
+            parsedKeys,
+            toolArgs: JSON.stringify({ keys: parsedKeys }),
+        };
+    }
+
+    const genericAngleToolMatch = response.match(genericAngleToolRegex);
+    if (genericAngleToolMatch) {
+        const toolName = genericAngleToolMatch[1].toLowerCase();
+        if (toolName !== 'execute_command' && toolName !== 'send_keys') {
+            try {
+                const payload = parseToolPayloadObject(genericAngleToolMatch[2]);
+                return {
+                    raw: genericAngleToolMatch[0],
+                    toolName,
+                    commandText: summarizeGenericToolPayload(payload, genericAngleToolMatch[2]),
+                    parsedKeys: [],
+                    toolArgs: JSON.stringify(payload || {}),
+                };
+            } catch {
+                return null;
+            }
+        }
+    }
+
+    const xmlToolMatch = response.match(xmlToolRegex);
+    if (xmlToolMatch) {
+        const toolName = xmlToolMatch[1].toLowerCase();
+        if (toolName !== 'execution' && toolName !== 'artifact') {
+            try {
+                const payload = parseToolPayloadObject(xmlToolMatch[2]);
+                return {
+                    raw: xmlToolMatch[0],
+                    toolName,
+                    commandText: summarizeGenericToolPayload(payload, xmlToolMatch[2]),
+                    parsedKeys: [],
+                    toolArgs: JSON.stringify(payload || {}),
+                };
+            } catch {
+                return null;
+            }
+        }
+    }
+
+    // XML-style bare content: <execute_command>cmd text</execute_command>
+    const xmlExecMatch = response.match(xmlExecuteCommandRegex);
+    if (xmlExecMatch) {
+        const command = normalizeWrappedString(xmlExecMatch[1].replace(/^["']|["']$/g, ''));
+        return {
+            raw: xmlExecMatch[0],
+            toolName: 'execute_command',
+            commandText: command,
+            parsedKeys: [],
+            toolArgs: JSON.stringify({ command }),
+        };
+    }
+
+    const xmlKeysMatch = response.match(xmlSendKeysRegex);
+    if (xmlKeysMatch) {
+        const parsedKeys = parseSendKeysPayload(xmlKeysMatch[1]) || [];
+        return {
+            raw: xmlKeysMatch[0],
+            toolName: 'send_keys',
+            commandText: xmlKeysMatch[1],
+            parsedKeys,
+            toolArgs: JSON.stringify({ keys: parsedKeys }),
+        };
+    }
+
+    // Catch-all XML bare tool: <tool_name>content</tool_name>
+    const STRUCTURAL_TAGS = new Set(['analysis', 'progress', 'tasklist', 'execution_plan', 'walkthrough', 'report', 'execution', 'artifact', 'reasoning', 'thought', 'thinking', 'reflection']);
+    const xmlBareMatch = response.match(xmlBareToolRegex);
+    if (xmlBareMatch) {
+        const toolName = xmlBareMatch[1].toLowerCase();
+        if (!STRUCTURAL_TAGS.has(toolName)) {
+            const rawContent = xmlBareMatch[2].trim();
+            // Try to parse as JSON first
+            try {
+                const payload = parseToolPayloadObject(rawContent);
+                if (payload) {
+                    return {
+                        raw: xmlBareMatch[0],
+                        toolName,
+                        commandText: summarizeGenericToolPayload(payload, rawContent),
+                        parsedKeys: [],
+                        toolArgs: JSON.stringify(payload),
+                    };
+                }
+            } catch { /* not JSON, use as raw string */ }
+            // Use raw content as the argument
+            return {
+                raw: xmlBareMatch[0],
+                toolName,
+                commandText: rawContent,
+                parsedKeys: [],
+                toolArgs: JSON.stringify({ input: rawContent }),
+            };
+        }
+    }
+
     const bracketMatch = response.match(bracketToolRegex);
     if (!bracketMatch) {
         const noArgsMatch = response.match(bracketToolNoArgsRegex);
@@ -1046,26 +1237,57 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         }
 
         if (payload && typeof payload === 'object') {
-            const summarizedArgument = typeof payload.query === 'string'
-                ? payload.query
-                : typeof payload.arg === 'string'
-                    ? payload.arg
-                : typeof payload.url === 'string'
-                    ? payload.url
-                    : typeof payload.keyword === 'string'
-                        ? payload.keyword
-                        : JSON.stringify(payload);
-
             return {
                 raw: bracketMatch[0],
                 toolName,
-                commandText: summarizedArgument,
+                commandText: summarizeGenericToolPayload(payload, bracketMatch[2]),
                 parsedKeys: [],
                 toolArgs: JSON.stringify(payload),
             };
         }
     } catch {
         return null;
+    }
+
+    // --- Smart fallback: heuristic detection for unexpected formats ---
+    // Catches patterns like: execute_command: "cmd", Command: `cmd`, RUN: "cmd", etc.
+    const heuristicExecMatch = response.match(
+        /(?:execute_command|execute|run_command|run|command)\s*[:=]\s*(?:"([^"]+)"|`([^`]+)`|'([^']+)')/i
+    );
+    if (heuristicExecMatch) {
+        const command = normalizeWrappedString(heuristicExecMatch[1] || heuristicExecMatch[2] || heuristicExecMatch[3]);
+        if (command) {
+            return {
+                raw: heuristicExecMatch[0],
+                toolName: 'execute_command',
+                commandText: command,
+                parsedKeys: [],
+                toolArgs: JSON.stringify({ command }),
+            };
+        }
+    }
+
+    // Heuristic for send_keys-like patterns
+    const heuristicKeysMatch = response.match(
+        /(?:send_keys|keys|keypress)\s*[:=]\s*(\[[\s\S]*?\])/i
+    );
+    if (heuristicKeysMatch) {
+        const parsedKeys = parseSendKeysPayload(heuristicKeysMatch[1]) || [];
+        if (parsedKeys.length > 0) {
+            return {
+                raw: heuristicKeysMatch[0],
+                toolName: 'send_keys',
+                commandText: heuristicKeysMatch[1],
+                parsedKeys,
+                toolArgs: JSON.stringify({ keys: parsedKeys }),
+            };
+        }
+    }
+
+    // Log suspected unparsed tool calls for debugging
+    const toolCallHints = /(?:execute_command|send_keys|EXECUTE|SEND_KEYS|TOOL|command\s*:|run\s*:)/i;
+    if (toolCallHints.test(response)) {
+        console.warn('[Parser] Suspected unparsed tool call in LLM response:', response.slice(-500));
     }
 
     return null;
@@ -1138,17 +1360,6 @@ const COMPLEX_REQUEST_KEYWORDS = [
     '보고',
 ];
 
-const isComplexRequest = (request: string): boolean => {
-    const normalized = request.trim().toLowerCase();
-    if (!normalized) return false;
-
-    const keywordHits = COMPLEX_REQUEST_KEYWORDS.filter(keyword => normalized.includes(keyword)).length;
-    const sentenceCount = normalized.split(/[.!?\n]/).map(token => token.trim()).filter(Boolean).length;
-    const conjunctionHits = (normalized.match(/\b(and|then|after|before|with|plus)\b/g) || []).length
-        + (normalized.match(/그리고|다음|이후|전에|및|해서|해서도|하면서/g) || []).length;
-
-    return normalized.length >= 140 || keywordHits >= 2 || sentenceCount >= 3 || conjunctionHits >= 2;
-};
 
 const SCREEN_CONTEXT_KEYWORDS = /화면|스크린|보이는|visible|ui|layout|버튼|입력창|chat|대화|terminal|터미널|prompt|프롬프트|nano|pico|vim|editor|편집기|pane|패널/i;
 
@@ -1421,7 +1632,9 @@ const shouldContinueAfterActionlessAnalysis = (response: string, userRequest: st
     const hasToolCall =
         /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*(?:{[\s\S]*?})?\s*\]/i.test(normalized)
         || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized);
+        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
+        || /(?:>>>|<<<)\s*[A-Z0-9_:-]+\s*:\s*{[\s\S]*?}\s*<<</i.test(normalized)
+        || /<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/i.test(normalized);
 
     if (hasToolCall) return false;
 
@@ -1495,11 +1708,33 @@ const stripToolCallMarkup = (value: string): string => (
         .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*\]/g, '')
         .replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"[\s\S]*?"\s*<<</g, '')
         .replace(/(?:>>>|<<<)\s*SEND_KEYS:\s*\[[\s\S]*?\]\s*<<</g, '')
+        .replace(/(?:>>>|<<<)\s*[A-Z0-9_:-]+\s*:\s*{[\s\S]*?}\s*<<</g, '')
+        .replace(/<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/g, '')
         .replace(/\[EXECUTE_COMMAND:\s*"[\s\S]*?"\s*\]/g, '')
         .replace(/\[SEND_KEYS:\s*\[[\s\S]*?\]\s*\]/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim()
 );
+
+const renderAvailableToolsForPrompt = (tools: Array<{ name: string; description?: string; inputSchema?: any }>): string => {
+    if (!tools.length) {
+        return 'AVAILABLE_TOOLS:\n- (none)';
+    }
+
+    const lines = tools.map((tool) => {
+        const propertyNames = Object.keys(tool.inputSchema?.properties || {});
+        const required = Array.isArray(tool.inputSchema?.required) ? tool.inputSchema.required : [];
+        const argsText = propertyNames.length
+            ? ` args: ${propertyNames.map((name) => `${name}${required.includes(name) ? '*' : ''}`).join(', ')}`
+            : ' args: none';
+        return `- ${tool.name}: ${(tool.description || '').trim()}${argsText}`;
+    });
+
+    lines.push('- Prefer search_web for current/latest internet information when it is available.');
+    lines.push('- Use read_web_page only for a specific URL or when the user explicitly asks to inspect a page.');
+
+    return `AVAILABLE_TOOLS:\n${lines.join('\n')}`;
+};
 
 const needsContinuationAfterPlan = (response: string): boolean => {
     const normalized = response.trim();
@@ -1517,7 +1752,9 @@ const needsContinuationAfterPlan = (response: string): boolean => {
         || /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/i.test(normalized)
         || /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*\]/i.test(normalized)
         || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized);
+        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
+        || /(?:>>>|<<<)\s*[A-Z0-9_:-]+\s*:\s*{[\s\S]*?}\s*<<</i.test(normalized)
+        || /<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/i.test(normalized);
 
     return !hasExecutionEvidence || /<\/execution_plan>\s*$/i.test(normalized);
 };
@@ -1530,7 +1767,26 @@ const needsContinuationAfterTrailingSection = (response: string): boolean => {
         return false;
     }
 
-    return /<\/(?:progress|tasklist|execution_plan|walkthrough)>\s*$/i.test(normalized);
+    // Exact trailing match (tag is at the very end)
+    if (/<\/(?:progress|tasklist|execution_plan|walkthrough)>\s*$/i.test(normalized)) {
+        return true;
+    }
+
+    // Allow short trailing text (≤ 80 chars) after the last closing tag
+    const closingTagPattern = /<\/(?:progress|tasklist|execution_plan|walkthrough)>/gi;
+    let lastTagEnd = -1;
+    let match: RegExpExecArray | null = null;
+    while ((match = closingTagPattern.exec(normalized)) !== null) {
+        lastTagEnd = match.index + match[0].length;
+    }
+    if (lastTagEnd > 0) {
+        const afterTag = normalized.slice(lastTagEnd).trim();
+        if (afterTag.length > 0 && afterTag.length <= 80) {
+            return true;
+        }
+    }
+
+    return false;
 };
 
 const TOOL_REQUIRED_REQUEST_KEYWORDS = /확인|조회|목록|검색|열어|열기|읽어|읽기|실행|생성|만들|삭제|이동|복사|경로|파일|디렉토리|폴더|버전|cpu|uptime|전원|배터리|시간|현재|status|list|count|check|inspect|read|open|run|execute|file|path|version|power|battery|time/i;
@@ -1546,7 +1802,9 @@ const needsContinuationAfterAnalysisOnly = (response: string, userRequest: strin
     const hasToolCall =
         /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*(?:{[\s\S]*?})?\s*\]/i.test(normalized)
         || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized);
+        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
+        || /(?:>>>|<<<)\s*[A-Z0-9_:-]+\s*:\s*{[\s\S]*?}\s*<<</i.test(normalized)
+        || /<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/i.test(normalized);
 
     if (hasToolCall) return false;
 
@@ -1604,24 +1862,6 @@ const detectInteractiveLaunchState = (commandText: string, terminalText: string)
     return 'unknown';
 };
 
-const detectWindowsCmdSyntax = (command: string): string | null => {
-    const normalized = command.trim().toLowerCase();
-    if (!normalized) return null;
-
-    const patterns: Array<{ pattern: RegExp; message: string }> = [
-        { pattern: /\bif\s+exist\b/, message: '`if exist`는 cmd.exe 문법입니다. PowerShell에서는 `if (Test-Path ...) { ... }`를 사용해야 합니다.' },
-        { pattern: /\bdir\b(?:\s|$)/, message: '`dir` 대신 PowerShell cmdlet이나 `Get-ChildItem`을 사용하세요.' },
-        { pattern: /\bcopy\b(?:\s|$)/, message: '`copy` 대신 `Copy-Item`을 사용하세요.' },
-        { pattern: /\bdel\b(?:\s|$)/, message: '`del` 대신 `Remove-Item`을 사용하세요.' },
-        { pattern: /\btype\b(?:\s|$)/, message: '`type` 대신 `Get-Content`를 사용하세요.' },
-        { pattern: /\bset\s+[a-z_][a-z0-9_]*=/, message: '`set VAR=value`는 cmd.exe 문법입니다. PowerShell에서는 `$env:VAR = "value"`를 사용하세요.' },
-        { pattern: /%[a-z0-9_]+%/i, message: '`%VAR%` 환경변수 문법은 cmd.exe 방식입니다. PowerShell에서는 `$env:VAR`를 사용하세요.' },
-        { pattern: /\b&&\b|\b\|\|\b/, message: '`&&` 또는 `||` 대신 PowerShell의 `;`, `if`, `-and`, `-or` 등을 사용하세요.' },
-    ];
-
-    const match = patterns.find(({ pattern }) => pattern.test(normalized));
-    return match ? match.message : null;
-};
 
 const ReasoningBox = ({ content, isThinking, durationMs }: { content: string, isThinking: boolean, durationMs?: number }) => {
     const [isCollapsed, setIsCollapsed] = useState(!isThinking);
@@ -2518,8 +2758,8 @@ ${t('greeting')}`
         nextResponse = await fetchLLMFollowUpWithTimeout(
             llmMessages,
             toolName === 'execute_command'
-                ? '작업은 실행됐지만 후속 요약 응답이 지연되고 있습니다. 왼쪽 터미널 결과를 직접 확인해 주세요.'
-                : `${toolName} 도구 실행은 완료됐지만 후속 응답이 지연되고 있습니다.`,
+                ? t('followUpDelayed')
+                : t('toolFollowUpDelayed').replace('{tool}', toolName),
             `continueAfterToolExecution:${toolName}`,
         );
         return nextResponse;
@@ -2559,10 +2799,6 @@ ${t('greeting')}`
         return lines.slice(-count);
     };
 
-    const getLastMeaningfulTerminalLine = (terminalText: string): string => {
-        const lines = getRecentMeaningfulTerminalLines(terminalText, 1);
-        return lines.length > 0 ? lines[lines.length - 1] : '';
-    };
 
     const looksLikeShellPromptLine = (line: string): boolean => {
         const trimmed = line.trim();
@@ -2644,7 +2880,7 @@ ${t('greeting')}`
         });
         return fetchLLMFollowUpWithTimeout(
             llmMessages,
-            `명령 \`${commandText}\` 은 전송됐지만 후속 요약 응답이 지연되고 있습니다. 현재 결과는 왼쪽 터미널에서 직접 확인해 주세요.`,
+            t('cmdFollowUpDelayed').replace('{cmd}', commandText),
             `summarizeTerminalTail:${commandText}`,
         );
     };
@@ -2710,20 +2946,20 @@ ${t('greeting')}`
         const cleaned = stripToolCallMarkup(responseSansCommand);
         if (toolName === 'execute_command') {
             if (isInteractiveTerminalLaunch(commandText)) {
-                return `\`${commandText}\` 명령을 실행했고 인터랙티브 프로그램이 열렸습니다. 왼쪽 터미널에서 바로 확인할 수 있습니다.`;
+                return t('interactiveLaunched').replace('{cmd}', commandText);
             }
-            return `\`${commandText}\` 명령을 터미널로 보냈습니다. 결과는 왼쪽 터미널에서 확인하세요.`;
+            return t('cmdSentToTerminal').replace('{cmd}', commandText);
         }
 
         if (toolName === 'send_keys') {
-            return '터미널에 키 입력을 전송했습니다.';
+            return t('keysSent');
         }
 
         if (cleaned) {
             return cleaned;
         }
 
-        return `\`${toolName}\` 도구를 실행했습니다.`;
+        return t('toolExecuted').replace('{tool}', toolName);
     };
 
     const inspectTerminalIfNeeded = async (
@@ -2899,7 +3135,7 @@ ${t('greeting')}`
                         ...message,
                         role: 'system',
                         commandRequest: undefined,
-                        content: `명령 실행이 취소되었습니다.\n\nCommand: \`${request.command}\``,
+                        content: `${t('cmdCanceled')}\n\nCommand: \`${request.command}\``,
                     }
                     : message
             )));
@@ -2911,7 +3147,7 @@ ${t('greeting')}`
                 ? {
                     ...message,
                     commandRequest: undefined,
-                    content: `사용자 승인을 받아 명령을 실행합니다.\n\nCommand: \`${request.command}\``,
+                    content: `${t('cmdApproved')}\n\nCommand: \`${request.command}\``,
                 }
                 : message
         )));
@@ -2926,7 +3162,7 @@ ${t('greeting')}`
             setMessages(prev => [...prev, {
                 role: 'tool',
                 name: request.toolName,
-                content: `Command: \`${request.command}\`${timedOut ? '\n\nNote: MCP 응답이 늦어 클라이언트 타임아웃으로 진행했습니다.' : ''}\n\nStatus: ${result}`
+                content: `Command: \`${request.command}\`${timedOut ? `\n\nNote: ${t('mcpTimeout')}` : ''}\n\nStatus: ${result}`
             }]);
 
             let response = buildTerminalToolSummary('execute_command', request.command, request.responseSansCommand);
@@ -2960,15 +3196,15 @@ ${t('greeting')}`
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
                 if (last?.role === 'assistant') {
-                    last.content = response || '명령 실행은 완료되었지만 후속 응답이 비어 있습니다.';
+                    last.content = response || t('cmdDoneNoResponse');
                     last.reasoning = currentThinking;
                     last.reasoningDurationMs = reasoningDurationMs;
                     return updated;
                 }
-                return [...updated, { role: 'assistant', content: response || '명령 실행은 완료되었지만 후속 응답이 비어 있습니다.', reasoning: currentThinking }];
+                return [...updated, { role: 'assistant', content: response || t('cmdDoneNoResponse'), reasoning: currentThinking }];
             });
         } catch (error: any) {
-            setMessages(prev => [...prev, { role: 'system', content: `❌ 승인된 명령 실행 실패: ${error.message || error}` }]);
+            setMessages(prev => [...prev, { role: 'system', content: `❌ ${t('approvedCmdFailed')} ${error.message || error}` }]);
         } finally {
             setIsLoading(false);
             setIsThinking(false);
@@ -3012,6 +3248,7 @@ ${t('greeting')}`
             console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} tools enabled.`);
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
             const complexRequest = shouldUseComplexTaskMode(trimmedInput);
+            const availableToolsSection = renderAvailableToolsForPrompt(activeTools);
             const trimmedGlobalUserPrompt = globalUserPrompt.trim();
             const globalUserPromptSection = trimmedGlobalUserPrompt
                 ? `
@@ -3033,9 +3270,12 @@ ${trimmedGlobalUserPrompt}
    Use only listed tools. Never invent file-edit tools.
 4. Use tools for terminal actions, system checks, files/paths, command results, latest web info, or page verification.
 5. Judge requests by meaning, not keywords, across all user languages.
-6. If terminal control is stuck in an interactive program, recover with CTRL_C on macOS. If OS is Windows, use PowerShell syntax only.${buildTaskWorkflowPrompt(complexRequest)}
+6. If terminal control is stuck in an interactive program, recover with CTRL_C on macOS. If OS is Windows, use PowerShell syntax only.
+7. When the user asks for current events, recent facts, or web verification, prefer search_web instead of answering from memory when that tool is available.${buildTaskWorkflowPrompt(complexRequest)}
 Current OS: ${window.navigator.platform}
-Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserPromptSection}`;
+Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}
+
+${availableToolsSection}${globalUserPromptSection}`;
 
             const historyToSend = newMessages.filter((msg, idx) => {
                 if (idx === 0 && msg.role === 'assistant') return false;
@@ -3101,11 +3341,14 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
             }
 
             if (!isCurrentRequest()) return;
-            if (
-                needsContinuationAfterPlan(response)
-                || needsContinuationAfterTrailingSection(response)
-                || shouldContinueAfterActionlessAnalysis(response, trimmedInput)
-            ) {
+            for (let continuationAttempt = 0; continuationAttempt < 3; continuationAttempt++) {
+                if (
+                    !needsContinuationAfterPlan(response)
+                    && !needsContinuationAfterTrailingSection(response)
+                    && !shouldContinueAfterActionlessAnalysis(response, trimmedInput)
+                ) {
+                    break;
+                }
                 ensureAssistantPlaceholder();
                 setCurrentThinking('');
                 currentThinkingRef.current = '';
@@ -3130,7 +3373,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         `Model: ${modelName}`,
                         `MaxTokens: ${maxTokens}`,
                         `Temperature: ${temperature}`,
-                        `Context Source: continuation`,
+                        `Context Source: continuation (attempt ${continuationAttempt + 1})`,
                     ].join('\n'), apiKey),
                     requestMessages: maskSensitiveText(safeJsonStringify(buildLLMMessages(continuationHistory, baseSystemPrompt, {
                         includeScreenContext: shouldIncludeScreenContext(continuationHistory),
@@ -3234,7 +3477,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         setMessages(prev => {
                             const next = [...prev, {
                                 role: 'system' as const,
-                                content: `${response ? `${response}\n\n` : ''}Windows에서는 PowerShell 문법만 사용해야 합니다. ${windowsCmdSyntaxError}`,
+                                content: `${response ? `${response}\n\n` : ''}${t('windowsPsOnly')} ${windowsCmdSyntaxError}`,
                             }];
                             messagesRef.current = next;
                             return next;
@@ -3248,7 +3491,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         setMessages(prev => {
                             const next = [...prev, {
                                 role: 'system' as const,
-                                content: response || '위험한 명령이 감지되어 실행되지 않았습니다.',
+                                content: response || t('dangerousCmdBlocked'),
                                 commandRequest: {
                                     status: 'blocked' as const,
                                     command: commandText,
@@ -3275,7 +3518,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         setMessages(prev => {
                             const next = [...prev, {
                                 role: 'system' as const,
-                                content: response || '이 명령은 실행 전에 사용자 승인이 필요합니다.',
+                                content: response || t('cmdNeedsApproval'),
                                 commandRequest: {
                                     status: 'approval' as const,
                                     command: commandText,
@@ -3302,7 +3545,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
-                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${effectiveCommandText}\`${normalizedSendKeys?.reason ? `\n\nRemap: ${normalizedSendKeys.reason}` : ''}${timedOut ? '\n\nNote: MCP 응답이 늦어 클라이언트 타임아웃으로 진행했습니다.' : ''}\n\nStatus: ${result}`
+                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${effectiveCommandText}\`${normalizedSendKeys?.reason ? `\n\nRemap: ${normalizedSendKeys.reason}` : ''}${timedOut ? `\n\nNote: ${t('mcpTimeout')}` : ''}\n\nStatus: ${result}`
                         };
                         setMessages(prev => {
                             const next = [...prev, toolResultForUi];
@@ -3363,13 +3606,50 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
                         break;
                     }
                 } else {
+                    // Check if response ended on an incomplete progress-like section
+                    if (
+                        needsContinuationAfterPlan(response)
+                        || needsContinuationAfterTrailingSection(response)
+                    ) {
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        const contHistory = [
+                            ...loopHistory,
+                            { role: 'assistant' as const, content: response },
+                            {
+                                role: 'user' as const,
+                                content: '[App Notice] The previous reply ended on a progress-like section and appears incomplete. Continue from the last section now and perform the next concrete action or finish the report instead of repeating prior sections.',
+                            },
+                        ];
+                        await syncRecentTerminalContextBuffer(activeTabId);
+                        response = await FetchLLMResponse(
+                            apiUrl,
+                            apiKey,
+                            modelName,
+                            maxTokens,
+                            temperature,
+                            provider,
+                            true,
+                            buildLLMMessages(contHistory, baseSystemPrompt, {
+                                includeScreenContext: false,
+                            }),
+                        );
+                        updateDebugTrace({
+                            rawResponse: maskSensitiveText(response, apiKey),
+                        });
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
+                    }
                     break;
                 }
             }
 
             if (!isCurrentRequest()) return;
             if (!response && !currentThinking && !commandIntercepted) {
-                response = "죄송합니다. 응답을 생성하지 못했습니다. 설정을 확인하거나 다시 시도해 주세요.";
+                response = t('noResponseError');
             }
 
             if (commandIntercepted) {
@@ -3477,7 +3757,7 @@ Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}${globalUserProm
 1. Conversation history cleared
 2. Memory buffer released
 </progress>
-대화 기록이 초기화되었습니다. 무엇을 도와드릴까요?`
+${t('chatCleared')}`
         }];
         messagesRef.current = nextMessages;
         setMessages(nextMessages);

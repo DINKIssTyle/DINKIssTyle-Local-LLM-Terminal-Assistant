@@ -8,13 +8,10 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os/exec"
-	"regexp"
 	"runtime"
-	"strings"
+
 	"time"
 
 	"github.com/chromedp/cdproto/page"
@@ -27,65 +24,56 @@ func GetCurrentTime() (string, error) {
 	return fmt.Sprintf("Current Local Time: %s", now.Format("2006-01-02 15:04:05 Monday MST")), nil
 }
 
-// SearchWeb performs a search using DuckDuckGo Lite and returns a summary.
+// SearchWeb performs a search using DuckDuckGo HTML and returns a summary.
 func SearchWeb(query string) (string, error) {
 	logVerbosef("[MCP] Searching Web for: %s", query)
 
-	searchURL := fmt.Sprintf("https://lite.duckduckgo.com/lite/?q=%s", url.QueryEscape(query))
+	searchURL := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(query))
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("GET", searchURL, nil)
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+	)
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer allocCancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var res string
+	err := chromedp.Run(ctx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			_, err := page.AddScriptToEvaluateOnNewDocument(`
+				Object.defineProperty(navigator, 'webdriver', {get: () => false});
+			`).Do(ctx)
+			return err
+		}),
+		chromedp.Navigate(searchURL),
+		chromedp.Sleep(2*time.Second),
+		chromedp.Evaluate(`
+			(() => {
+				let results = [];
+				document.querySelectorAll(".result__body").forEach(body => {
+					let a = body.querySelector(".result__title .result__a");
+					let snippet = body.querySelector(".result__snippet");
+					if (a && snippet) {
+						results.push("Title: " + a.innerText.trim() + "\nLink: " + a.href + "\nSnippet: " + snippet.innerText.trim());
+					}
+				});
+				return results.length > 0 ? results.join("\n---\n") : "No results found or parsing failed.";
+			})()
+		`, &res),
+	)
+
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36")
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	htmlContent := string(body)
-
-	var results []string
-	linkRegex := regexp.MustCompile(`(?s)href="(.*?)" class='result-link'>(.*?)</a>`)
-	snippetRegex := regexp.MustCompile(`(?s)class='result-snippet'>(.*?)</td>`)
-
-	matches := linkRegex.FindAllStringSubmatch(htmlContent, 5)
-	snippets := snippetRegex.FindAllStringSubmatch(htmlContent, 5)
-
-	count := len(matches)
-	if len(snippets) < count {
-		count = len(snippets)
-	}
-
-	for i := 0; i < count; i++ {
-		link := matches[i][1]
-		title := matches[i][2]
-		snippet := snippets[i][1]
-
-		title = strings.ReplaceAll(title, "<b>", "")
-		title = strings.ReplaceAll(title, "</b>", "")
-		title = strings.ReplaceAll(title, "&quot;", "\"")
-		title = strings.ReplaceAll(title, "&amp;", "&")
-
-		snippet = strings.ReplaceAll(snippet, "&quot;", "\"")
-		snippet = strings.ReplaceAll(snippet, "&amp;", "&")
-
-		results = append(results, fmt.Sprintf("Title: %s\nLink: %s\nSnippet: %s\n", title, link, snippet))
-	}
-
-	if len(results) == 0 {
-		return "No results found or parsing failed.", nil
-	}
-
-	return strings.Join(results, "\n---\n"), nil
+	return res, nil
 }
 
 // SearchNamuwiki searches Namuwiki.
