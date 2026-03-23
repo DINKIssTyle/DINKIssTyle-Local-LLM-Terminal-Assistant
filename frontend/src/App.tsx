@@ -138,6 +138,7 @@ function renderTextBlock(block: string): string {
 function stripMarkupForContext(text: string): string {
     return text
         .replace(/<analysis>([\s\S]*?)<\/analysis>/gi, '$1')
+        .replace(/<\/?execution>/gi, '')
         .replace(/<progress[^>]*>([\s\S]*?)<\/progress>/gi, '$1')
         .replace(/<tasklist[^>]*>([\s\S]*?)<\/tasklist>/gi, '$1')
         .replace(/<execution_plan[^>]*>([\s\S]*?)<\/execution_plan>/gi, '$1')
@@ -336,6 +337,8 @@ function renderMarkdown(text: string): string {
     html = html.replace(/<analysis>([\s\S]*?)<\/analysis>/gi, (_, content) => {
         return stash(`<div class="message-block analysis-block"><span class="analysis-icon">Inspect</span><strong>${renderInlineMarkdown(content.trim())}</strong></div>`);
     });
+
+    html = html.replace(/<\/?execution>/gi, '');
 
     html = html.replace(/<div\b[^>]*>[\s\S]*?<\/div>/gi, (block) => {
         return stash(`<section class="message-block">${renderLooseHtmlBlock(block)}</section>`);
@@ -1483,8 +1486,11 @@ const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
 7. COMPLEX TASK BEHAVIOR: Do not only propose a plan. Actually carry out the work, keep the task list aligned with the work performed, and finish with a completion report.`;
 };
 
+const FOLLOW_UP_LLM_TIMEOUT_MS = 20000;
+
 const stripToolCallMarkup = (value: string): string => (
     value
+        .replace(/<\/?execution>/gi, '')
         .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/g, '')
         .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*\]/g, '')
         .replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"[\s\S]*?"\s*<<</g, '')
@@ -2190,7 +2196,11 @@ ${t('greeting')}`
             scheduleTerminalFit(activeTabId);
             void syncRecentTerminalContextBuffer(activeTabId);
         }
-    }, [activeTabId, chatWidth]);
+    }, [activeTabId, chatWidth, debugPanelEnabled]);
+
+    useEffect(() => {
+        Object.keys(fitAddonsRef.current).forEach(id => scheduleTerminalFit(id));
+    }, [debugPanelEnabled]);
 
     useEffect(() => {
         GetTools().then(setAvailableTools);
@@ -2441,6 +2451,42 @@ ${t('greeting')}`
         return `Sent to terminal: ${normalized}`;
     };
 
+    const fetchLLMFollowUpWithTimeout = async (
+        llmMessages: any[],
+        fallbackResponse: string,
+        contextLabel: string,
+    ): Promise<string> => {
+        let timeoutHandle: number | null = null;
+        let timedOut = false;
+
+        try {
+            const response = await Promise.race([
+                FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages),
+                new Promise<string>((resolve) => {
+                    timeoutHandle = window.setTimeout(() => {
+                        timedOut = true;
+                        void StopLLMResponse();
+                        resolve(fallbackResponse);
+                    }, FOLLOW_UP_LLM_TIMEOUT_MS);
+                }),
+            ]);
+
+            updateDebugTrace(timedOut
+                ? {
+                    rawResponse: maskSensitiveText(response, apiKey),
+                    terminalNotes: `${contextLabel}\nFollow-up timed out after ${FOLLOW_UP_LLM_TIMEOUT_MS}ms.\nFallback: ${fallbackResponse}`,
+                }
+                : {
+                    rawResponse: maskSensitiveText(response, apiKey),
+                });
+            return response;
+        } finally {
+            if (timeoutHandle !== null) {
+                window.clearTimeout(timeoutHandle);
+            }
+        }
+    };
+
     const continueAfterToolExecution = async (
         toolName: string,
         toolArgs: string,
@@ -2469,10 +2515,13 @@ ${t('greeting')}`
             requestMessages: maskSensitiveText(safeJsonStringify(llmMessages), apiKey),
             terminalNotes: `Continuation after ${toolName}\nResult summary:\n${result}`,
         });
-        nextResponse = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
-        updateDebugTrace({
-            rawResponse: maskSensitiveText(nextResponse, apiKey),
-        });
+        nextResponse = await fetchLLMFollowUpWithTimeout(
+            llmMessages,
+            toolName === 'execute_command'
+                ? '작업은 실행됐지만 후속 요약 응답이 지연되고 있습니다. 왼쪽 터미널 결과를 직접 확인해 주세요.'
+                : `${toolName} 도구 실행은 완료됐지만 후속 응답이 지연되고 있습니다.`,
+            `continueAfterToolExecution:${toolName}`,
+        );
         return nextResponse;
     };
 
@@ -2593,11 +2642,11 @@ ${t('greeting')}`
             requestMessages: maskSensitiveText(safeJsonStringify(llmMessages), apiKey),
             terminalNotes: `Terminal follow-up\nCommand: ${commandText}\n\nTail:\n${terminalTail}`,
         });
-        const followUpResponse = await FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages);
-        updateDebugTrace({
-            rawResponse: maskSensitiveText(followUpResponse, apiKey),
-        });
-        return followUpResponse;
+        return fetchLLMFollowUpWithTimeout(
+            llmMessages,
+            `명령 \`${commandText}\` 은 전송됐지만 후속 요약 응답이 지연되고 있습니다. 현재 결과는 왼쪽 터미널에서 직접 확인해 주세요.`,
+            `summarizeTerminalTail:${commandText}`,
+        );
     };
 
     const callToolWithClientTimeout = async (
