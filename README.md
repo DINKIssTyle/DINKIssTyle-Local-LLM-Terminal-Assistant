@@ -3,7 +3,7 @@ Created by DINKIssTyle on 2026.
 Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 -->
 
-# DKST Terminal Assistant (DINKIssTyle-Local-LLM-Terminal-Assistant)
+# DKST Terminal Assistant
 
 ## 한국어 소개 (Korean)
 
