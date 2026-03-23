@@ -45,8 +45,14 @@ func (t *Terminal) Start() error {
 	} else {
 		shell = os.Getenv("SHELL")
 		if shell == "" {
-			shell = "/bin/sh"
+			if runtime.GOOS == "darwin" {
+				shell = "/bin/zsh"
+			} else {
+				shell = "/bin/sh"
+			}
 		}
+		// macOS GUI 앱 환경에서는 환경변수(PATH 등)가 제한적이므로 로그인 쉘(-l)로 실행하여 사용자 환경을 모두 로드합니다.
+		shellArgs = []string{"-l"}
 	}
 
 	p, err := pty.New()

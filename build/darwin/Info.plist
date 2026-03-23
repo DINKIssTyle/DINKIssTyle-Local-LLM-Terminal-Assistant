@@ -59,5 +59,17 @@
           {{end}}
         </array>
         {{end}}
+        <key>NSHighResolutionCapable</key>
+        <true/>
+        <key>NSAppleEventsUsageDescription</key>
+        <string>DKST Terminal Assistant needs to send events to manage terminal tasks.</string>
+        <key>NSDesktopFolderUsageDescription</key>
+        <string>DKST Terminal Assistant needs access to your Desktop folder to manage files.</string>
+        <key>NSDocumentsFolderUsageDescription</key>
+        <string>DKST Terminal Assistant needs access to your Documents folder to manage files.</string>
+        <key>NSDownloadsFolderUsageDescription</key>
+        <string>DKST Terminal Assistant needs access to your Downloads folder to manage files.</string>
+        <key>NSNetworkVolumesUsageDescription</key>
+        <string>DKST Terminal Assistant needs access to network volumes to manage files.</string>
     </dict>
 </plist>
