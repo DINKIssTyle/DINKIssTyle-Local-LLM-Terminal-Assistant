@@ -63,6 +63,13 @@ function splitMarkdownBlocks(text: string): string[] {
             continue;
         }
 
+        if (/^(#{1,6})\s+(.*)$/.test(line)) {
+            flush();
+            blocks.push(line.trim());
+            index += 1;
+            continue;
+        }
+
         const next = sourceLines[index + 1] || '';
         if (looksLikeMarkdownTableRow(line) && isMarkdownTableSeparatorLine(next)) {
             flush();
@@ -1646,13 +1653,14 @@ const shouldContinueAfterActionlessAnalysis = (response: string, userRequest: st
     if (hasCompletionEvidence) return false;
 
     const hasAnalysisOnly = /<analysis\b[\s\S]*?<\/analysis>/i.test(normalized);
+    const isLiterallyOnlyAnalysis = /^(?:<analysis\b[\s\S]*?<\/analysis>\s*)+$/i.test(normalized);
     const requestLooksActionable =
         /[`"'\\/]/.test(userRequest)
         || /\b[a-z0-9_-]+\.[a-z0-9]{1,8}\b/i.test(userRequest)
         || /\bhttps?:\/\//i.test(userRequest)
         || /(^|\s)(\/|~|[A-Za-z]:\\)/.test(userRequest);
 
-    return hasAnalysisOnly && requestLooksActionable;
+    return isLiterallyOnlyAnalysis || (hasAnalysisOnly && requestLooksActionable);
 };
 
 const detectWindowsPowerShellSyntaxIssue = (command: string): string | null => {
@@ -1907,6 +1915,7 @@ function App() {
     const [modelName, setModelName] = useState(() => localStorage.getItem('modelName') || 'qwen/qwen3.5-35b-a3b');
     const [maxTokens, setMaxTokens] = useState(() => Number(localStorage.getItem('maxTokens')) || 10000);
     const [temperature, setTemperature] = useState(() => Number(localStorage.getItem('temperature')) || 0.7);
+    const [toolTemperature, setToolTemperature] = useState(() => Number(localStorage.getItem('toolTemperature')) || 0.1);
     const [provider, setProvider] = useState(() => localStorage.getItem('provider') || 'LM Studio');
     const [globalUserPrompt, setGlobalUserPrompt] = useState(() => localStorage.getItem('globalUserPrompt') || '');
 
@@ -1960,6 +1969,7 @@ function App() {
         localStorage.setItem('modelName', modelName);
         localStorage.setItem('maxTokens', String(maxTokens));
         localStorage.setItem('temperature', String(temperature));
+        localStorage.setItem('toolTemperature', String(toolTemperature));
         localStorage.setItem('provider', provider);
         localStorage.setItem('globalUserPrompt', globalUserPrompt);
         localStorage.setItem('termFontSize', String(termFontSize));
@@ -1975,7 +1985,7 @@ function App() {
         localStorage.setItem('approvalCommandPatterns', approvalCommandPatterns);
         localStorage.setItem('enabledTools', JSON.stringify(enabledTools));
         localStorage.setItem('debugPanelEnabled', String(debugPanelEnabled));
-    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, provider, globalUserPrompt, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools, debugPanelEnabled]);
+    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, toolTemperature, provider, globalUserPrompt, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools, debugPanelEnabled]);
 
     const handleSaveSettings = () => {
         const nextMaxTokens = Number.parseInt(maxTokensInput, 10);
@@ -2695,13 +2705,14 @@ ${t('greeting')}`
         llmMessages: any[],
         fallbackResponse: string,
         contextLabel: string,
+        temp: number,
     ): Promise<string> => {
         let timeoutHandle: number | null = null;
         let timedOut = false;
 
         try {
             const response = await Promise.race([
-                FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temperature, provider, true, llmMessages),
+                FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temp, provider, true, llmMessages),
                 new Promise<string>((resolve) => {
                     timeoutHandle = window.setTimeout(() => {
                         timedOut = true;
@@ -2749,7 +2760,7 @@ ${t('greeting')}`
                 `Provider: ${provider}`,
                 `Model: ${modelName}`,
                 `MaxTokens: ${maxTokens}`,
-                `Temperature: ${temperature}`,
+                `Temperature: ${toolTemperature}`,
                 `Context Source: continueAfterToolExecution`,
             ].join('\n'), apiKey),
             requestMessages: maskSensitiveText(safeJsonStringify(llmMessages), apiKey),
@@ -2761,6 +2772,7 @@ ${t('greeting')}`
                 ? t('followUpDelayed')
                 : t('toolFollowUpDelayed').replace('{tool}', toolName),
             `continueAfterToolExecution:${toolName}`,
+            toolTemperature
         );
         return nextResponse;
     };
@@ -2872,7 +2884,7 @@ ${t('greeting')}`
                 `Provider: ${provider}`,
                 `Model: ${modelName}`,
                 `MaxTokens: ${maxTokens}`,
-                `Temperature: ${temperature}`,
+                `Temperature: ${toolTemperature}`,
                 `Context Source: summarizeTerminalTail`,
             ].join('\n'), apiKey),
             requestMessages: maskSensitiveText(safeJsonStringify(llmMessages), apiKey),
@@ -2882,6 +2894,7 @@ ${t('greeting')}`
             llmMessages,
             t('cmdFollowUpDelayed').replace('{cmd}', commandText),
             `summarizeTerminalTail:${commandText}`,
+            toolTemperature
         );
     };
 
@@ -3629,7 +3642,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
                             apiKey,
                             modelName,
                             maxTokens,
-                            temperature,
+                            toolTemperature,
                             provider,
                             true,
                             buildLLMMessages(contHistory, baseSystemPrompt, {
@@ -4022,6 +4035,7 @@ ${t('chatCleared')}`
                                             <span className="settings-hint">{t('tokensHint')}</span>
                                         </div>
                                         <div className="settings-field"><label>{t('temperature')}</label><input type="number" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></div>
+                                        <div className="settings-field"><label>{t('toolTemperature')}</label><input type="number" step="0.1" min="0.0" max="1.0" value={toolTemperature} onChange={e => setToolTemperature(Number(e.target.value))} /></div>
                                         <div className="settings-field full">
                                             <label>{t('globalUserPrompt')}</label>
                                             <textarea
