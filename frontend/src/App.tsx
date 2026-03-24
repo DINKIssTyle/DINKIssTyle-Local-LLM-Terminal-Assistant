@@ -509,36 +509,6 @@ function renderMarkdown(text: string): string {
 
     html = html.replace(/<\/artifact>/gi, '');
 
-    html = html.replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</g, (_, command) => {
-        return stash(`<section class="message-block command-block">
-            <div class="command-header">
-                <span>Run In Terminal</span>
-                <span class="progress-meta">Action</span>
-            </div>
-            <div class="command-body"><code>${escapeHtml(command.trim())}</code></div>
-        </section>`);
-    });
-
-    html = html.replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)\s*<<</g, (_, command) => {
-        return stash(`<section class="message-block command-block">
-            <div class="command-header">
-                <span>Run In Terminal</span>
-                <span class="progress-meta">Action</span>
-            </div>
-            <div class="command-body"><code>${escapeHtml(command.trim())}</code></div>
-        </section>`);
-    });
-
-    html = html.replace(/(?:>>>|<<<)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</g, (_, keysJson) => {
-        return stash(`<section class="message-block command-block">
-            <div class="command-header">
-                <span>Send Keys</span>
-                <span class="progress-meta">Action</span>
-            </div>
-            <div class="command-body"><code>${escapeHtml(keysJson.trim())}</code></div>
-        </section>`);
-    });
-
     html = html.replace(/(?:>>>|<<<)\s*([A-Z0-9_:-]+)\s*:\s*({[\s\S]*?})\s*<<</gi, (_, toolName, payloadJson) => {
         const normalizedToolName = String(toolName || '').trim().toLowerCase();
         if (!normalizedToolName || normalizedToolName === 'execute_command' || normalizedToolName === 'send_keys') {
@@ -582,113 +552,6 @@ function renderMarkdown(text: string): string {
                 <span class="progress-meta">Tool</span>
             </div>
             <div class="command-body"><code>${escapeHtml(displayValue)}</code></div>
-        </section>`);
-    });
-
-    html = html.replace(/\[EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*\]/gi, (_, command) => {
-        return stash(`<section class="message-block command-block">
-            <div class="command-header">
-                <span>Run In Terminal</span>
-                <span class="progress-meta">Action</span>
-            </div>
-            <div class="command-body"><code>${escapeHtml(command.trim())}</code></div>
-        </section>`);
-    });
-
-    html = html.replace(/\[SEND_KEYS:\s*(\[[\s\S]*?\])\s*\]/gi, (_, keysJson) => {
-        return stash(`<section class="message-block command-block">
-            <div class="command-header">
-                <span>Send Keys</span>
-                <span class="progress-meta">Action</span>
-            </div>
-            <div class="command-body"><code>${escapeHtml(keysJson.trim())}</code></div>
-        </section>`);
-    });
-
-    html = html.replace(/\[TOOL:\s*execute_command\s*({[\s\S]*?})\s*\]/gi, (_, payloadJson) => {
-        try {
-            const payload = JSON.parse(payloadJson);
-            const normalized = normalizeExecuteCommandPayload(payload, payloadJson);
-            const command = normalized?.commandText || payloadJson.trim();
-            return stash(`<section class="message-block command-block">
-                <div class="command-header">
-                    <span>Run In Terminal</span>
-                    <span class="progress-meta">Action</span>
-                </div>
-                <div class="command-body"><code>${escapeHtml(command)}</code></div>
-            </section>`);
-        } catch {
-            return stash(`<section class="message-block command-block">
-                <div class="command-header">
-                    <span>Run In Terminal</span>
-                    <span class="progress-meta">Action</span>
-                </div>
-                <div class="command-body"><code>${escapeHtml(payloadJson.trim())}</code></div>
-            </section>`);
-        }
-    });
-
-    html = html.replace(/\[TOOL:\s*send_keys\s*({[\s\S]*?})\s*\]/gi, (_, payloadJson) => {
-        try {
-            const payload = JSON.parse(payloadJson);
-            const normalized = normalizeSendKeysPayloadObject(payload, payloadJson);
-            const keys = normalized?.commandText || payloadJson.trim();
-            return stash(`<section class="message-block command-block">
-                <div class="command-header">
-                    <span>Send Keys</span>
-                    <span class="progress-meta">Action</span>
-                </div>
-                <div class="command-body"><code>${escapeHtml(keys)}</code></div>
-            </section>`);
-        } catch {
-            return stash(`<section class="message-block command-block">
-                <div class="command-header">
-                    <span>Send Keys</span>
-                    <span class="progress-meta">Action</span>
-                </div>
-                <div class="command-body"><code>${escapeHtml(payloadJson.trim())}</code></div>
-            </section>`);
-        }
-    });
-
-    html = html.replace(/\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*({[\s\S]*?})\s*\]/gi, (_, toolName, payloadJson) => {
-        const normalizedToolName = String(toolName || '').trim();
-        if (!normalizedToolName || normalizedToolName === 'execute_command' || normalizedToolName === 'send_keys') {
-            return _;
-        }
-
-        let displayValue = payloadJson.trim();
-        try {
-            const payload = JSON.parse(payloadJson);
-            if (typeof payload.query === 'string') displayValue = payload.query;
-            else if (typeof payload.url === 'string') displayValue = payload.url;
-            else if (typeof payload.keyword === 'string') displayValue = payload.keyword;
-            else displayValue = JSON.stringify(payload);
-        } catch {
-            // noop
-        }
-
-        return stash(`<section class="message-block command-block">
-            <div class="command-header">
-                <span>${escapeHtml(normalizedToolName.replace(/_/g, ' '))}</span>
-                <span class="progress-meta">Tool</span>
-            </div>
-            <div class="command-body"><code>${escapeHtml(displayValue)}</code></div>
-        </section>`);
-    });
-
-    html = html.replace(/\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*\]/gi, (_, toolName) => {
-        const normalizedToolName = String(toolName || '').trim();
-        if (!normalizedToolName || normalizedToolName === 'execute_command' || normalizedToolName === 'send_keys') {
-            return _;
-        }
-
-        return stash(`<section class="message-block command-block">
-            <div class="command-header">
-                <span>${escapeHtml(normalizedToolName.replace(/_/g, ' '))}</span>
-                <span class="progress-meta">Tool</span>
-            </div>
-            <div class="command-body"><code>(no arguments)</code></div>
         </section>`);
     });
 
@@ -1026,6 +889,12 @@ const summarizeGenericToolPayload = (payload: Record<string, unknown> | null, ra
     }
 
     return rawPayload.trim();
+};
+
+const serializeToolCallForHistory = (toolName: string, toolArgs: string): string => {
+    const normalizedToolName = String(toolName || '').trim().toLowerCase();
+    const normalizedArgs = toolArgs.trim();
+    return `<${normalizedToolName}>${normalizedArgs || '{}'}</${normalizedToolName}>`;
 };
 
 const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
@@ -1664,11 +1533,7 @@ const shouldContinueAfterActionlessAnalysis = (response: string, userRequest: st
     if (!normalized) return false;
 
     const hasToolCall =
-        /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*(?:{[\s\S]*?})?\s*\]/i.test(normalized)
-        || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*[A-Z0-9_:-]+\s*:\s*{[\s\S]*?}\s*<<</i.test(normalized)
-        || /<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/i.test(normalized);
+        /<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/i.test(normalized);
 
     if (hasToolCall) return false;
 
@@ -1739,14 +1604,7 @@ const FOLLOW_UP_LLM_TIMEOUT_MS = 20000;
 const stripToolCallMarkup = (value: string): string => (
     value
         .replace(/<\/?execution>/gi, '')
-        .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/g, '')
-        .replace(/\[TOOL:\s*[a-zA-Z0-9_:-]+\s*\]/g, '')
-        .replace(/(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"[\s\S]*?"\s*<<</g, '')
-        .replace(/(?:>>>|<<<)\s*SEND_KEYS:\s*\[[\s\S]*?\]\s*<<</g, '')
-        .replace(/(?:>>>|<<<)\s*[A-Z0-9_:-]+\s*:\s*{[\s\S]*?}\s*<<</g, '')
         .replace(/<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/g, '')
-        .replace(/\[EXECUTE_COMMAND:\s*"[\s\S]*?"\s*\]/g, '')
-        .replace(/\[SEND_KEYS:\s*\[[\s\S]*?\]\s*\]/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim()
 );
@@ -1784,11 +1642,6 @@ const needsContinuationAfterPlan = (response: string): boolean => {
         /<walkthrough\b[\s\S]*?<\/walkthrough>/i.test(normalized)
         || /<report\b[\s\S]*?<\/report>/i.test(normalized)
         || /<artifact\b[\s\S]*?<\/artifact>/i.test(normalized)
-        || /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*{[\s\S]*?}\s*\]/i.test(normalized)
-        || /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*\]/i.test(normalized)
-        || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*[A-Z0-9_:-]+\s*:\s*{[\s\S]*?}\s*<<</i.test(normalized)
         || /<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/i.test(normalized);
 
     return !hasExecutionEvidence || /<\/execution_plan>\s*$/i.test(normalized);
@@ -1835,11 +1688,7 @@ const needsContinuationAfterAnalysisOnly = (response: string, userRequest: strin
     }
 
     const hasToolCall =
-        /\[TOOL:\s*[a-zA-Z0-9_:-]+\s*(?:{[\s\S]*?})?\s*\]/i.test(normalized)
-        || /\[(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*(?:EXECUTE_COMMAND|SEND_KEYS):/i.test(normalized)
-        || /(?:>>>|<<<)\s*[A-Z0-9_:-]+\s*:\s*{[\s\S]*?}\s*<<</i.test(normalized)
-        || /<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/i.test(normalized);
+        /<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/i.test(normalized);
 
     if (hasToolCall) return false;
 
@@ -2834,7 +2683,7 @@ ${t('greeting')}`
         const toolContent = (toolRole === 'user') ? `[Tool Response from ${toolName}]: ${summarizedResult}` : summarizedResult;
         const toolResultMsg: Message = { role: toolRole, content: toolContent, name: toolName };
 
-        history.push({ role: 'assistant', content: `[TOOL: ${toolName} ${toolArgs}]` });
+        history.push({ role: 'assistant', content: serializeToolCallForHistory(toolName, toolArgs) });
         history.push(toolResultMsg);
     };
 
@@ -3322,11 +3171,11 @@ ${trimmedGlobalUserPrompt}
             const baseSystemPrompt = `You are ${mcpLabel}, a professional AI engineer. 
 1. Keep answers compact for a narrow side chat. Use <analysis>, <progress>, and <artifact> only when helpful.
 2. SCREEN_CONTEXT is only for visible UI/terminal/chat state. Do not use it as proof for files, paths, counts, command output, or other verifiable system facts when tools can check them.
-3. Tool syntax is strict:
-   - Terminal command: >>> EXECUTE_COMMAND: "YOUR_COMMAND" <<<
-   - Terminal keys: >>> SEND_KEYS: ["ESC", ":q!", "ENTER"] <<<
-   - Other tools: [TOOL: tool_name {"arg":"value"}]
-   Use only listed tools. Never invent file-edit tools.
+3. Tool syntax is strict. Use exactly one structured format for all tool calls:
+   - Terminal command: <execute_command>{"command":"YOUR_COMMAND"}</execute_command>
+   - Terminal keys: <send_keys>{"keys":["ESC",":q!","ENTER"]}</send_keys>
+   - Other tools: <tool_name>{"arg":"value"}</tool_name>
+   Use only listed tools. Never invent file-edit tools. Do not use legacy wrappers like >>> ... <<< or [TOOL: ...].
 4. Use tools for terminal actions, system checks, files/paths, command results, latest web info, or page verification.
 5. Judge requests by meaning, not keywords, across all user languages.
 6. If terminal control is stuck in an interactive program, recover with CTRL_C on macOS. If OS is Windows, use PowerShell syntax only.
@@ -3503,7 +3352,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
                             response = await continueAfterToolExecution(
                                 toolName,
                                 effectiveToolArgs,
-                                `Error: tool not available: ${toolName}. Use one of the explicitly available tools. For file creation on Windows, use EXECUTE_COMMAND with PowerShell such as Set-Content or Out-File.`,
+                                `Error: tool not available: ${toolName}. Use one of the explicitly available tools. For file creation on Windows, use <execute_command>{"command":"Set-Content ... or Out-File ..."}</execute_command> with PowerShell syntax.`,
                                 loopHistory,
                                 baseSystemPrompt,
                                 response,
@@ -3521,7 +3370,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
                         response = await continueAfterToolExecution(
                             toolName,
                             '{}',
-                            `Error: ${toolName} requires explicit arguments. Do not emit [TOOL: ${toolName}] by itself. Re-issue the tool call with the required JSON payload and continue the task.`,
+                            `Error: ${toolName} requires explicit arguments. Do not emit <${toolName}>{}</${toolName}> by itself. Re-issue the tool call with the required JSON payload and continue the task.`,
                             loopHistory,
                             baseSystemPrompt,
                             response,
