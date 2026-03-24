@@ -10,7 +10,7 @@ import '@xterm/xterm/css/xterm.css';
 import './App.css';
 import mcpDocsContent from './assets/docs/mcp.md?raw';
 import { getTranslation, Language } from './i18n/translations';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse } from "../wailsjs/go/main/App";
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/main/App";
 import { EventsOn, EventsEmit, WindowFullscreen, WindowIsFullscreen, WindowUnfullscreen } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
@@ -315,6 +315,32 @@ function renderLooseHtmlBlock(htmlSource: string): string {
     return renderTextBlock(normalized);
 }
 
+function renderMarkdownContent(text: string): string {
+    const placeholders: string[] = [];
+    const stash = (value: string) => {
+        const token = `@@MARKDOWN_BLOCK_${placeholders.length}@@`;
+        placeholders.push(value);
+        return token;
+    };
+
+    let html = text;
+
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, language, code) => {
+        return stash(`<pre><code class="language-${escapeHtml(language || 'plain')}">${escapeHtml(code.trim())}</code></pre>`);
+    });
+
+    html = splitMarkdownBlocks(html)
+        .map(block => renderTextBlock(block.trim()))
+        .filter(Boolean)
+        .join('');
+
+    placeholders.forEach((block, index) => {
+        html = html.replace(`@@MARKDOWN_BLOCK_${index}@@`, block);
+    });
+
+    return html;
+}
+
 function renderArtifactBody(content: string): string {
     const trimmed = content.trim();
     if (!trimmed) return '';
@@ -323,10 +349,7 @@ function renderArtifactBody(content: string): string {
         .replace(/\r\n/g, '\n')
         .replace(/\n{3,}/g, '\n\n');
 
-    return splitMarkdownBlocks(normalized)
-        .map(block => renderTextBlock(block.trim()))
-        .filter(Boolean)
-        .join('');
+    return renderMarkdownContent(normalized);
 }
 
 function renderMarkdown(text: string): string {
@@ -669,20 +692,24 @@ function renderMarkdown(text: string): string {
         </section>`);
     });
 
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, language, code) => {
-        return stash(`<pre><code class="language-${escapeHtml(language || 'plain')}">${escapeHtml(code.trim())}</code></pre>`);
-    });
-
-    html = splitMarkdownBlocks(html)
-        .map(block => renderTextBlock(block))
-        .filter(Boolean)
-        .join('');
+    html = renderMarkdownContent(html);
 
     placeholders.forEach((block, index) => {
         html = html.replace(`@@BLOCK_${index}@@`, block);
     });
 
     return html;
+}
+
+function getPermissionHint(platform: string, t: (key: Parameters<typeof getTranslation>[1]) => string): string {
+    switch (platform) {
+        case 'darwin':
+            return t('permissionsMacHint');
+        case 'windows':
+            return t('permissionsWindowsHint');
+        default:
+            return t('permissionsLinuxHint');
+    }
 }
 
 interface Message {
@@ -1907,6 +1934,7 @@ function App() {
     const [activeTabId, setActiveTabId] = useState('1');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isMcpDocsOpen, setIsMcpDocsOpen] = useState(false);
+    const [runtimePlatform, setRuntimePlatform] = useState('unknown');
 
     // Settings with persistence
     const [language, setLanguage] = useState<Language>(() => (localStorage.getItem('language') as Language) || 'ko');
@@ -2018,6 +2046,14 @@ function App() {
     }, []);
 
     useEffect(() => {
+        GetRuntimePlatform()
+            .then((platform) => setRuntimePlatform(platform || 'unknown'))
+            .catch((error) => {
+                console.error('Failed to get runtime platform:', error);
+            });
+    }, []);
+
+    useEffect(() => {
         if (!isSettingsOpen) {
             setIsMcpDocsOpen(false);
         }
@@ -2030,6 +2066,16 @@ function App() {
     const [availableTools, setAvailableTools] = useState<any[]>([]);
     
     const t = (key: Parameters<typeof getTranslation>[1]) => getTranslation(language, key);
+    const permissionHint = getPermissionHint(runtimePlatform, t);
+
+    const handleOpenPermissionSettings = async () => {
+        try {
+            await OpenPermissionSettings();
+        } catch (error) {
+            console.error('Failed to open permission settings:', error);
+            alert(t('permissionsManualHint'));
+        }
+    };
 
     const [messages, setMessages] = useState<Message[]>([
         {
@@ -4106,6 +4152,28 @@ ${t('chatCleared')}`
                                                 </label>
                                             </div>
                                         ))}
+                                    </div>
+                                </div>
+                                <div className="settings-section">
+                                    <h4>{t('permissions')}</h4>
+                                    <div className="settings-grid">
+                                        <div className="settings-field full permission-field">
+                                            <div className="permission-card">
+                                                <div className="permission-copy">
+                                                    <strong>{t('permissionsTitle')}</strong>
+                                                    <span className="settings-hint">{permissionHint}</span>
+                                                    <span className="settings-hint">{t('permissionsManualHint')}</span>
+                                                </div>
+                                                <button
+                                                    className="mini-reset-btn permission-btn"
+                                                    type="button"
+                                                    onClick={handleOpenPermissionSettings}
+                                                    disabled={runtimePlatform !== 'darwin' && runtimePlatform !== 'windows'}
+                                                >
+                                                    {t('permissionsOpenSettings')}
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="settings-section">

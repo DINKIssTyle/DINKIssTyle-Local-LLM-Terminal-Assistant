@@ -22,6 +22,10 @@ export function GetRecentTerminalBuffer(arg1, arg2) {
   return window['go']['main']['App']['GetRecentTerminalBuffer'](arg1, arg2);
 }
 
+export function GetRuntimePlatform() {
+  return window['go']['main']['App']['GetRuntimePlatform']();
+}
+
 export function GetTools() {
   return window['go']['main']['App']['GetTools']();
 }
@@ -32,6 +36,10 @@ export function Greet(arg1) {
 
 export function LoadModel(arg1, arg2, arg3) {
   return window['go']['main']['App']['LoadModel'](arg1, arg2, arg3);
+}
+
+export function OpenPermissionSettings() {
+  return window['go']['main']['App']['OpenPermissionSettings']();
 }
 
 export function ReadActiveTerminalTail(arg1, arg2, arg3) {
