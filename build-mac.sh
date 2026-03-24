@@ -3,6 +3,9 @@
 
 set -e
 
+APP_NAME="DKST Terminal Assistant"
+APP_PATH="build/bin/${APP_NAME}.app"
+
 echo "[INFO] Starting macOS build for DKST Terminal Assistant..."
 
 # Ensure frontend is built
@@ -19,14 +22,26 @@ cd ..
 
 # Clear previous build artifacts to avoid lipo directory conflicts
 echo "[INFO] Cleaning old build artifacts..."
-rm -rf "build/bin/DKST Terminal Assistant.app"
-rm -f "build/bin/DKST Terminal Assistant.app-amd64"
-rm -f "build/bin/DKST Terminal Assistant.app-arm64"
-rm -f "build/bin/DKST Terminal Assistant.app.lipo"
+rm -rf "${APP_PATH}"
+rm -f "${APP_PATH}-amd64"
+rm -f "${APP_PATH}-arm64"
+rm -f "${APP_PATH}.lipo"
 
 # Run wails build (Universal for Mac M1/M2/M3 and Intel)
 # IMPORTANT: Use the name without .app to avoid directory/file collision during lipo
 echo "[INFO] Running wails build (darwin/universal)..."
-wails build -platform darwin/universal -o "DKST Terminal Assistant"
+wails build -clean -platform darwin/universal -o "${APP_NAME}"
 
-echo "[SUCCESS] Build complete: build/bin/DKST Terminal Assistant.app"
+if [ ! -d "${APP_PATH}" ]; then
+    echo "[ERROR] Expected app bundle was not created: ${APP_PATH}"
+    exit 1
+fi
+
+if [ -n "${CODESIGN_IDENTITY}" ]; then
+    echo "[INFO] Codesigning app with identity: ${CODESIGN_IDENTITY}"
+    codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${APP_PATH}"
+fi
+
+echo "[SUCCESS] Build complete: ${APP_PATH}"
+echo "[INFO] Bundle identifier is fixed in build/darwin/Info.plist as com.dinkisstyle.dkstterminalassistant"
+echo "[INFO] For stable macOS permissions, run the same signed app bundle from a fixed location such as /Applications."
