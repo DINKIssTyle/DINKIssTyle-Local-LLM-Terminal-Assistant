@@ -682,12 +682,29 @@ type ParsedToolCall = {
     toolArgs: string;
 };
 
+type TerminalObservation = {
+    toolName: string;
+    commandText: string;
+    toolResult: string;
+    promptRecovered: boolean;
+    blocker: string | null;
+    interactiveState: 'opened' | 'not_opened' | 'unknown' | null;
+    tailAvailable: boolean;
+    visibleTerminal: string;
+    tail: string;
+    combinedTerminal: string;
+    recentEvidence: string;
+    assessmentHint: string;
+};
+
 const TERMINAL_CONTEXT_CHAR_LIMIT = 4000;
 const TASK_MEMORY_REQUEST_LIMIT = 3;
 const TASK_MEMORY_PLAN_LIMIT = 6;
 const TASK_MEMORY_STEP_LIMIT = 6;
 const TASK_MEMORY_EVIDENCE_LIMIT = 2;
 const TASK_MEMORY_RECENT_MESSAGE_LIMIT = 6;
+const INTERNAL_ONLY_TOOL_NAMES = new Set(['read_terminal_tail']);
+const DEFAULT_ENABLED_TOOLS = ['search_web', 'read_web_page', 'get_current_time', 'execute_command', 'send_keys', 'naver_search', 'namu_wiki'];
 
 type LLMProgressState = {
     phase: 'model-load' | 'prompt-processing';
@@ -898,6 +915,7 @@ const serializeToolCallForHistory = (toolName: string, toolArgs: string): string
 };
 
 const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
+    const normalizedResponse = normalizeEscapedXmlToolTags(response);
     const executeRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
     const forgivingExecuteRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)\s*<<</;
     const sendKeysRegex = /(?:>>>|<<<)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*<<</;
@@ -918,7 +936,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const bareSendKeysRegex = /(?:^|\n)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*(?:\n|$)/i;
     const bareGenericToolRegex = /(?:^|\n)\s*([A-Z][A-Z0-9_]+)\s*:\s*({[\s\S]*?})\s*(?:\n|$)/;
 
-    const commandMatch = response.match(executeRegex);
+    const commandMatch = normalizedResponse.match(executeRegex);
     if (commandMatch) {
         const command = normalizeWrappedString(commandMatch[1]);
         return {
@@ -930,7 +948,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         };
     }
 
-    const forgivingCommandMatch = response.match(forgivingExecuteRegex);
+    const forgivingCommandMatch = normalizedResponse.match(forgivingExecuteRegex);
     if (forgivingCommandMatch) {
         const command = normalizeWrappedString(forgivingCommandMatch[1].replace(/"$/, ''));
         return {
@@ -942,7 +960,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         };
     }
 
-    const keyMatch = response.match(sendKeysRegex);
+    const keyMatch = normalizedResponse.match(sendKeysRegex);
     if (keyMatch) {
         const parsedKeys = parseSendKeysPayload(keyMatch[1]) || [];
         return {
@@ -954,7 +972,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         };
     }
 
-    const bracketExecuteMatch = response.match(bracketExecuteRegex);
+    const bracketExecuteMatch = normalizedResponse.match(bracketExecuteRegex);
     if (bracketExecuteMatch) {
         const command = normalizeWrappedString(bracketExecuteMatch[1]);
         return {
@@ -966,7 +984,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         };
     }
 
-    const bracketSendKeysMatch = response.match(bracketSendKeysRegex);
+    const bracketSendKeysMatch = normalizedResponse.match(bracketSendKeysRegex);
     if (bracketSendKeysMatch) {
         const parsedKeys = parseSendKeysPayload(bracketSendKeysMatch[1]) || [];
         return {
@@ -979,7 +997,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     }
 
     // --- Bare fallback (no delimiters) ---
-    const bareExecuteMatch = response.match(bareExecuteRegex);
+    const bareExecuteMatch = normalizedResponse.match(bareExecuteRegex);
     if (bareExecuteMatch) {
         const command = normalizeWrappedString(bareExecuteMatch[1]);
         return {
@@ -991,7 +1009,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         };
     }
 
-    const bareSendKeysMatch = response.match(bareSendKeysRegex);
+    const bareSendKeysMatch = normalizedResponse.match(bareSendKeysRegex);
     if (bareSendKeysMatch) {
         const parsedKeys = parseSendKeysPayload(bareSendKeysMatch[1]) || [];
         return {
@@ -1003,7 +1021,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         };
     }
 
-    const genericAngleToolMatch = response.match(genericAngleToolRegex);
+    const genericAngleToolMatch = normalizedResponse.match(genericAngleToolRegex);
     if (genericAngleToolMatch) {
         const toolName = genericAngleToolMatch[1].toLowerCase();
         if (toolName !== 'execute_command' && toolName !== 'send_keys') {
@@ -1022,10 +1040,71 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         }
     }
 
-    const xmlToolMatch = response.match(xmlToolRegex);
+    // XML-style bare content: <execute_command>cmd text</execute_command>
+    const xmlExecMatch = normalizedResponse.match(xmlExecuteCommandRegex);
+    if (xmlExecMatch) {
+        const rawContent = xmlExecMatch[1].trim();
+        const normalizedPayload = normalizeExecuteCommandPayload(parseToolPayloadObject(rawContent), rawContent);
+        if (normalizedPayload) {
+            return {
+                raw: xmlExecMatch[0],
+                toolName: 'execute_command',
+                commandText: normalizedPayload.commandText,
+                parsedKeys: [],
+                toolArgs: normalizedPayload.toolArgs,
+            };
+        }
+
+        const command = normalizeWrappedString(rawContent.replace(/^["']|["']$/g, ''));
+        return {
+            raw: xmlExecMatch[0],
+            toolName: 'execute_command',
+            commandText: command,
+            parsedKeys: [],
+            toolArgs: JSON.stringify({ command }),
+        };
+    }
+
+    const xmlKeysMatch = normalizedResponse.match(xmlSendKeysRegex);
+    if (xmlKeysMatch) {
+        const parsedKeys = parseSendKeysPayload(xmlKeysMatch[1]) || [];
+        return {
+            raw: xmlKeysMatch[0],
+            toolName: 'send_keys',
+            commandText: xmlKeysMatch[1],
+            parsedKeys,
+            toolArgs: JSON.stringify({ keys: parsedKeys }),
+        };
+    }
+
+    const xmlToolMatch = normalizedResponse.match(xmlToolRegex);
     if (xmlToolMatch) {
         const toolName = xmlToolMatch[1].toLowerCase();
         if (toolName !== 'execution' && toolName !== 'artifact') {
+            if (toolName === 'execute_command') {
+                const normalized = normalizeExecuteCommandPayload(parseToolPayloadObject(xmlToolMatch[2]), xmlToolMatch[2]);
+                if (!normalized) return null;
+                return {
+                    raw: xmlToolMatch[0],
+                    toolName,
+                    commandText: normalized.commandText,
+                    parsedKeys: [],
+                    toolArgs: normalized.toolArgs,
+                };
+            }
+
+            if (toolName === 'send_keys') {
+                const normalized = normalizeSendKeysPayloadObject(parseToolPayloadObject(xmlToolMatch[2]), xmlToolMatch[2]);
+                if (!normalized) return null;
+                return {
+                    raw: xmlToolMatch[0],
+                    toolName,
+                    commandText: normalized.commandText,
+                    parsedKeys: normalized.parsedKeys,
+                    toolArgs: normalized.toolArgs,
+                };
+            }
+
             try {
                 const payload = parseToolPayloadObject(xmlToolMatch[2]);
                 return {
@@ -1041,34 +1120,9 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         }
     }
 
-    // XML-style bare content: <execute_command>cmd text</execute_command>
-    const xmlExecMatch = response.match(xmlExecuteCommandRegex);
-    if (xmlExecMatch) {
-        const command = normalizeWrappedString(xmlExecMatch[1].replace(/^["']|["']$/g, ''));
-        return {
-            raw: xmlExecMatch[0],
-            toolName: 'execute_command',
-            commandText: command,
-            parsedKeys: [],
-            toolArgs: JSON.stringify({ command }),
-        };
-    }
-
-    const xmlKeysMatch = response.match(xmlSendKeysRegex);
-    if (xmlKeysMatch) {
-        const parsedKeys = parseSendKeysPayload(xmlKeysMatch[1]) || [];
-        return {
-            raw: xmlKeysMatch[0],
-            toolName: 'send_keys',
-            commandText: xmlKeysMatch[1],
-            parsedKeys,
-            toolArgs: JSON.stringify({ keys: parsedKeys }),
-        };
-    }
-
     // Catch-all XML bare tool: <tool_name>content</tool_name>
     const STRUCTURAL_TAGS = new Set(['analysis', 'progress', 'tasklist', 'execution_plan', 'walkthrough', 'report', 'execution', 'artifact', 'reasoning', 'thought', 'thinking', 'reflection']);
-    const xmlBareMatch = response.match(xmlBareToolRegex);
+    const xmlBareMatch = normalizedResponse.match(xmlBareToolRegex);
     if (xmlBareMatch) {
         const toolName = xmlBareMatch[1].toLowerCase();
         if (!STRUCTURAL_TAGS.has(toolName)) {
@@ -1097,9 +1151,9 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         }
     }
 
-    const bracketMatch = response.match(bracketToolRegex);
+    const bracketMatch = normalizedResponse.match(bracketToolRegex);
     if (!bracketMatch) {
-        const noArgsMatch = response.match(bracketToolNoArgsRegex);
+        const noArgsMatch = normalizedResponse.match(bracketToolNoArgsRegex);
         if (!noArgsMatch) return null;
 
         const toolName = noArgsMatch[1].toLowerCase();
@@ -1154,7 +1208,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
 
     // --- Smart fallback: heuristic detection for unexpected formats ---
     // Catches patterns like: execute_command: "cmd", Command: `cmd`, RUN: "cmd", etc.
-    const heuristicExecMatch = response.match(
+    const heuristicExecMatch = normalizedResponse.match(
         /(?:execute_command|execute|run_command|run|command)\s*[:=]\s*(?:"([^"]+)"|`([^`]+)`|'([^']+)')/i
     );
     if (heuristicExecMatch) {
@@ -1171,7 +1225,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     }
 
     // Heuristic for send_keys-like patterns
-    const heuristicKeysMatch = response.match(
+    const heuristicKeysMatch = normalizedResponse.match(
         /(?:send_keys|keys|keypress)\s*[:=]\s*(\[[\s\S]*?\])/i
     );
     if (heuristicKeysMatch) {
@@ -1189,8 +1243,8 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
 
     // Log suspected unparsed tool calls for debugging
     const toolCallHints = /(?:execute_command|send_keys|EXECUTE|SEND_KEYS|TOOL|command\s*:|run\s*:)/i;
-    if (toolCallHints.test(response)) {
-        console.warn('[Parser] Suspected unparsed tool call in LLM response:', response.slice(-500));
+    if (toolCallHints.test(normalizedResponse)) {
+        console.warn('[Parser] Suspected unparsed tool call in LLM response:', normalizedResponse.slice(-500));
     }
 
     return null;
@@ -1235,10 +1289,6 @@ const getAppTabSwitchIndex = (keys: string[]): number | null => {
     const digit = normalized.find(token => /^[0-9]$/.test(token));
     if (!digit) return null;
     return digit === '0' ? 9 : Number(digit) - 1;
-};
-
-const shouldInspectTerminalAfterCommand = (command: string): boolean => {
-    return command.trim().length > 0;
 };
 
 const COMPLEX_REQUEST_KEYWORDS = [
@@ -1601,8 +1651,12 @@ const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
 
 const FOLLOW_UP_LLM_TIMEOUT_MS = 20000;
 
+const normalizeEscapedXmlToolTags = (value: string): string => (
+    value.replace(/<\\\/([a-zA-Z0-9_:-]+)>/g, '</$1>')
+);
+
 const stripToolCallMarkup = (value: string): string => (
-    value
+    normalizeEscapedXmlToolTags(value)
         .replace(/<\/?execution>/gi, '')
         .replace(/<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/g, '')
         .replace(/\n{3,}/g, '\n\n')
@@ -1628,6 +1682,10 @@ const renderAvailableToolsForPrompt = (tools: Array<{ name: string; description?
 
     return `AVAILABLE_TOOLS:\n${lines.join('\n')}`;
 };
+
+const getPromptVisibleTools = (tools: Array<{ name: string; description?: string; inputSchema?: any }>, enabledTools: string[]) => (
+    tools.filter(tool => enabledTools.includes(tool.name) && !INTERNAL_ONLY_TOOL_NAMES.has(tool.name))
+);
 
 const needsContinuationAfterPlan = (response: string): boolean => {
     const normalized = response.trim();
@@ -1825,10 +1883,10 @@ function App() {
     const [enabledTools, setEnabledTools] = useState<string[]>(() => {
         try {
             const saved = localStorage.getItem('enabledTools');
-            return saved ? JSON.parse(saved) : ['search_web', 'read_web_page', 'get_current_time', 'execute_command', 'send_keys', 'read_terminal_tail', 'naver_search', 'namu_wiki'];
+            return saved ? JSON.parse(saved) : DEFAULT_ENABLED_TOOLS;
         } catch (e) {
             console.error("Error parsing enabledTools", e);
-            return ['search_web', 'read_web_page', 'get_current_time', 'execute_command', 'send_keys', 'read_terminal_tail', 'naver_search', 'namu_wiki'];
+            return DEFAULT_ENABLED_TOOLS;
         }
     });
     const [pendingApproval, setPendingApproval] = useState<PendingCommandApproval | null>(null);
@@ -2752,23 +2810,99 @@ ${t('greeting')}`
         return null;
     };
 
-    const summarizeTerminalTail = async (
-        userRequest: string,
+    const detectTerminalAssessmentHint = (commandText: string, toolResult: string, terminalText: string, promptRecovered: boolean, blocker: string | null, interactiveState: 'opened' | 'not_opened' | 'unknown' | null) => {
+        const combined = `${toolResult}\n${terminalText}`.toLowerCase();
+
+        if (blocker) return 'waiting_for_more_input';
+        if (interactiveState === 'opened') return 'interactive_program_open';
+        if (interactiveState === 'not_opened') return 'interactive_launch_failed';
+        if (/(permission denied|command not found|no such file|not recognized|failed|error:|exception|traceback)/i.test(combined)) {
+            return promptRecovered ? 'command_failed' : 'error_output_detected';
+        }
+        if (promptRecovered) return 'prompt_recovered';
+        return 'inconclusive';
+    };
+
+    const observeTerminalAfterTool = async (
+        toolName: string,
         commandText: string,
-        terminalTail: string,
+        toolResult: string,
+    ): Promise<TerminalObservation> => {
+        const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 2500, idleMs: 900 });
+        const { result: tail } = await callToolWithClientTimeout(
+            'read_terminal_tail',
+            tailArgs,
+            '(terminal tail unavailable: client timeout while waiting for MCP acknowledgement)',
+        );
+        const visibleTerminal = getVisibleTerminalText();
+        const tailAvailable = !tail.includes('terminal tail unavailable');
+        const combinedTerminal = [visibleTerminal.trim(), tail.trim()].filter(Boolean).join('\n');
+        const promptRecovered = hasRecoveredShellPrompt(visibleTerminal) || hasRecoveredShellPrompt(tail);
+        const interactiveState = toolName === 'execute_command' && isInteractiveTerminalLaunch(commandText)
+            ? detectInteractiveLaunchState(commandText, combinedTerminal)
+            : null;
+        const blocker = detectTerminalBlockerState(combinedTerminal);
+        const evidenceLines = getRecentMeaningfulTerminalLines(
+            tailAvailable
+                ? (tail.trim() === '(no recent terminal output)' ? combinedTerminal : tail)
+                : combinedTerminal || toolResult,
+            10,
+        );
+        const recentEvidence = evidenceLines.length > 0
+            ? evidenceLines.join('\n')
+            : (toolResult.trim() || '(no observable terminal evidence)');
+        const assessmentHint = detectTerminalAssessmentHint(commandText, toolResult, combinedTerminal, promptRecovered, blocker, interactiveState);
+
+        return {
+            toolName,
+            commandText,
+            toolResult,
+            promptRecovered,
+            blocker,
+            interactiveState,
+            tailAvailable,
+            visibleTerminal,
+            tail,
+            combinedTerminal,
+            recentEvidence,
+            assessmentHint,
+        };
+    };
+
+    const summarizeTerminalObservation = async (
+        userRequest: string,
+        observation: TerminalObservation,
         historyToSend: Message[],
         baseSystemPrompt: string,
     ) => {
         const analysisPrompt = `${baseSystemPrompt}
-5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal command that was run for that request, and the terminal output that appeared after it. Answer the user's request directly using the terminal result, not by merely describing the command. If the request asks for a fact like CPU, version, file name, or status, state that fact plainly in the first sentence.
-6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and mention the supporting evidence briefly. If it failed, start with "${t('workFailed')}" and explain why. If the result is still inconclusive, start with "${t('workIncomplete')}" and explain what is missing. If terminal output alone is inconclusive, use SCREEN_CONTEXT to check whether the prompt returned or the visible app state suggests completion. Do not emit tool calls in this follow-up summary.
-7. If COMPLEX TASK MODE applies, preserve the same runbook style and end with a <report> block instead of a plain summary when possible.`;
+5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal action that was run, and a structured terminal status snapshot collected by the app. Answer the user's request directly using that evidence, not by describing the observation process.
+6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and mention the supporting evidence briefly. If it failed, start with "${t('workFailed')}" and explain why. If the result is still inconclusive, start with "${t('workIncomplete')}" and explain what is missing. Use SCREEN_CONTEXT only as supporting evidence when the terminal snapshot is ambiguous. Do not emit tool calls in this follow-up summary.
+7. Treat "assessment hint" as a hint, not a guaranteed truth. Prefer the concrete evidence lines when they contradict the hint.
+8. If COMPLEX TASK MODE applies, preserve the same runbook style and end with a <report> block instead of a plain summary when possible.`;
+
+        const observationBlock = [
+            `[Terminal action]`,
+            `Tool: ${observation.toolName}`,
+            `Command or keys: ${observation.commandText}`,
+            `Immediate tool result: ${observation.toolResult || '(empty)'}`,
+            '',
+            `[Structured terminal status]`,
+            `Assessment hint: ${observation.assessmentHint}`,
+            `Prompt recovered: ${observation.promptRecovered ? 'yes' : 'no'}`,
+            `Interactive state: ${observation.interactiveState || 'n/a'}`,
+            `Blocker: ${observation.blocker || 'none'}`,
+            `Tail available: ${observation.tailAvailable ? 'yes' : 'no'}`,
+            '',
+            `[Recent terminal evidence]`,
+            observation.recentEvidence || '(none)',
+        ].join('\n');
 
         const terminalContext: Message[] = [
             ...historyToSend,
             {
                 role: 'user',
-                content: `[Latest user request]\n${userRequest || '(missing)'}\n\n[Executed command]\n${commandText}\n\n[Terminal output after the command]\n${terminalTail}`,
+                content: `[Latest user request]\n${userRequest || '(missing)'}\n\n${observationBlock}`,
             },
         ];
 
@@ -2780,15 +2914,15 @@ ${t('greeting')}`
                 `Model: ${modelName}`,
                 `MaxTokens: ${maxTokens}`,
                 `Temperature: ${toolTemperature}`,
-                `Context Source: summarizeTerminalTail`,
+                `Context Source: summarizeTerminalObservation`,
             ].join('\n'), apiKey),
             requestMessages: maskSensitiveText(safeJsonStringify(llmMessages), apiKey),
-            terminalNotes: `Terminal follow-up\nCommand: ${commandText}\n\nTail:\n${terminalTail}`,
+            terminalNotes: `Terminal follow-up\nCommand: ${observation.commandText}\n\nAssessment: ${observation.assessmentHint}\n\nEvidence:\n${observation.recentEvidence}`,
         });
         return fetchLLMFollowUpWithTimeout(
             llmMessages,
-            t('cmdFollowUpDelayed').replace('{cmd}', commandText),
-            `summarizeTerminalTail:${commandText}`,
+            t('cmdFollowUpDelayed').replace('{cmd}', observation.commandText),
+            `summarizeTerminalObservation:${observation.commandText}`,
             toolTemperature
         );
     };
@@ -2873,6 +3007,7 @@ ${t('greeting')}`
     const inspectTerminalIfNeeded = async (
         toolName: string,
         commandText: string,
+        toolResult: string,
         historyToSend: Message[],
         baseSystemPrompt: string,
         responseSansCommand: string,
@@ -2880,53 +3015,13 @@ ${t('greeting')}`
         if (toolName !== 'execute_command' && toolName !== 'send_keys') {
             return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
         }
-
-        if (toolName === 'execute_command' && !shouldInspectTerminalAfterCommand(commandText)) {
-            return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
-        }
-
-        const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 2500, idleMs: 900 });
-        const { result: tail } = await callToolWithClientTimeout(
-            'read_terminal_tail',
-            tailArgs,
-            '(terminal tail unavailable: client timeout while waiting for MCP acknowledgement)',
+        const observation = await observeTerminalAfterTool(toolName, commandText, toolResult);
+        return summarizeTerminalObservation(
+            getLatestUserRequest(historyToSend),
+            observation,
+            [...historyToSend],
+            baseSystemPrompt,
         );
-        const visibleTerminal = getVisibleTerminalText();
-        const combinedTerminal = `${visibleTerminal}\n${tail}`;
-        const promptRecovered = hasRecoveredShellPrompt(visibleTerminal) || hasRecoveredShellPrompt(tail);
-
-        if (toolName === 'execute_command' && isInteractiveTerminalLaunch(commandText)) {
-            const interactiveState = detectInteractiveLaunchState(commandText, combinedTerminal);
-            if (interactiveState === 'opened') {
-                return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
-            }
-            if (interactiveState === 'not_opened') {
-                return `작업이 실패했습니다. \`${commandText}\` 실행 후에도 인터랙티브 프로그램이 열린 흔적이 보이지 않고 쉘 프롬프트로 돌아와 있습니다.`;
-            }
-        }
-
-        if (toolName === 'send_keys' && promptRecovered) {
-            return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
-        }
-
-        const blocker = detectTerminalBlockerState(combinedTerminal);
-        if (blocker) {
-            return `작업이 아직 진행 중이거나 완료 여부가 불분명합니다. ${blocker}`;
-        }
-
-        if (tail.includes('terminal tail unavailable')) {
-            const visibleOnly = visibleTerminal.trim();
-            if (!visibleOnly || visibleOnly === t('terminalEmpty') || visibleOnly === t('terminalUnavailable')) {
-                return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
-            }
-            return summarizeTerminalTail(getLatestUserRequest(historyToSend), commandText, visibleOnly, [...historyToSend], baseSystemPrompt);
-        }
-
-        const terminalSummarySource = tail.trim() === '(no recent terminal output)'
-            ? combinedTerminal
-            : tail;
-
-        return summarizeTerminalTail(getLatestUserRequest(historyToSend), commandText, terminalSummarySource, [...historyToSend], baseSystemPrompt);
     };
 
     const ensureAssistantPlaceholder = () => {
@@ -3092,6 +3187,7 @@ ${t('greeting')}`
                 response = await inspectTerminalIfNeeded(
                     request.toolName,
                     request.command,
+                    result,
                     [...request.historyToSend],
                     request.baseSystemPrompt,
                     request.responseSansCommand,
@@ -3152,8 +3248,8 @@ ${t('greeting')}`
         });
 
         try {
-            const activeTools = availableTools.filter(t => enabledTools.includes(t.name));
-            console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} tools enabled.`);
+            const activeTools = getPromptVisibleTools(availableTools, enabledTools);
+            console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} prompt-visible tools enabled.`);
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
             const complexRequest = shouldUseComplexTaskMode(trimmedInput);
             const availableToolsSection = renderAvailableToolsForPrompt(activeTools);
@@ -3501,6 +3597,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
                             response = await inspectTerminalIfNeeded(
                                 toolName,
                                 effectiveCommandText,
+                                result,
                                 loopHistory,
                                 baseSystemPrompt,
                                 response,
@@ -3993,7 +4090,7 @@ ${t('chatCleared')}`
                                     </div>
                                     <h4 style={{ marginTop: '20px' }}>{t('toolManagement')}</h4>
                                     <div className="tool-toggle-list">
-                                        {availableTools.map(tool => (
+                                        {availableTools.filter(tool => !INTERNAL_ONLY_TOOL_NAMES.has(tool.name)).map(tool => (
                                             <div key={tool.name} className="tool-toggle-item">
                                                 <label>
                                                     <input type="checkbox" checked={enabledTools.includes(tool.name)} onChange={e => e.target.checked ? setEnabledTools([...enabledTools, tool.name]) : setEnabledTools(enabledTools.filter(t => t !== tool.name))} />
