@@ -2015,6 +2015,7 @@ ${t('greeting')}`
     const requestSequenceRef = useRef(0);
     const llmProgressHideTimeoutRef = useRef<number | null>(null);
     const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+    const lastTokenAtRef = useRef<number>(0);
 
     const getNextTabName = (existingTabs: Tab[]): string => {
         const usedNumbers = new Set(
@@ -2152,6 +2153,7 @@ ${t('greeting')}`
 
     useEffect(() => {
         const unoffChunk = EventsOn("llm:chunk", (chunk: string) => {
+            lastTokenAtRef.current = Date.now();
             setMessages(prev => {
                 const last = prev[prev.length - 1];
                 if (last && last.role === 'assistant') {
@@ -2164,12 +2166,14 @@ ${t('greeting')}`
         });
 
         const unoffThinking = EventsOn("llm:thinking", (chunk: string) => {
+            lastTokenAtRef.current = Date.now();
             beginReasoningTimer();
             setCurrentThinking(prev => prev + chunk);
             setIsThinking(true);
         });
 
         const unoffProgress = EventsOn("llm:status", (payload: any) => {
+            lastTokenAtRef.current = Date.now();
             if (!payload?.active) {
                 if (llmProgressHideTimeoutRef.current !== null) {
                     window.clearTimeout(llmProgressHideTimeoutRef.current);
@@ -2771,23 +2775,40 @@ ${t('greeting')}`
     ): Promise<string> => {
         let timeoutHandle: number | null = null;
         let timedOut = false;
+        lastTokenAtRef.current = Date.now();
 
         try {
             const response = await Promise.race([
                 FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temp, provider, true, llmMessages),
                 new Promise<string>((resolve) => {
-                    timeoutHandle = window.setTimeout(() => {
-                        timedOut = true;
-                        void StopLLMResponse();
-                        resolve(fallbackResponse);
-                    }, FOLLOW_UP_LLM_TIMEOUT_MS);
+                    const checkInterval = 2000;
+                    const maxIdleMs = FOLLOW_UP_LLM_TIMEOUT_MS;
+                    const startTime = Date.now();
+
+                    const tick = () => {
+                        const now = Date.now();
+                        const timeSinceLastToken = now - lastTokenAtRef.current;
+                        const totalTime = now - startTime;
+
+                        // Timeout if no activity for maxIdleMs, 
+                        // BUT only after an initial grace period of FOLLOW_UP_LLM_TIMEOUT_MS 
+                        // (to account for prompt processing which doesn't emit tokens).
+                        if (timeSinceLastToken > maxIdleMs && totalTime > maxIdleMs) {
+                            timedOut = true;
+                            void StopLLMResponse();
+                            resolve(fallbackResponse);
+                        } else {
+                            timeoutHandle = window.setTimeout(tick, checkInterval);
+                        }
+                    };
+                    timeoutHandle = window.setTimeout(tick, checkInterval);
                 }),
             ]);
 
             updateDebugTrace(timedOut
                 ? {
                     rawResponse: maskSensitiveText(response, apiKey),
-                    terminalNotes: `${contextLabel}\nFollow-up timed out after ${FOLLOW_UP_LLM_TIMEOUT_MS}ms.\nFallback: ${fallbackResponse}`,
+                    terminalNotes: `${contextLabel}\nFollow-up timed out after inactivity.\nFallback: ${fallbackResponse}`,
                 }
                 : {
                     rawResponse: maskSensitiveText(response, apiKey),
