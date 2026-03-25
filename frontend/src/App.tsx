@@ -1291,29 +1291,6 @@ const getAppTabSwitchIndex = (keys: string[]): number | null => {
     return digit === '0' ? 9 : Number(digit) - 1;
 };
 
-const COMPLEX_REQUEST_KEYWORDS = [
-    'complex',
-    '복잡',
-    '단계',
-    'multi-step',
-    'workflow',
-    'plan',
-    'task',
-    '태스크',
-    '워크스루',
-    'walkthrough',
-    '구현',
-    '설계',
-    '리팩터',
-    'refactor',
-    'investigate',
-    '분석',
-    '검토',
-    'end-to-end',
-    '보고',
-];
-
-
 const SCREEN_CONTEXT_KEYWORDS = /화면|스크린|보이는|visible|ui|layout|버튼|입력창|chat|대화|terminal|터미널|prompt|프롬프트|nano|pico|vim|editor|편집기|pane|패널/i;
 
 const clampText = (value: string, maxLength: number): string => {
@@ -1629,8 +1606,11 @@ const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
     if (!complexRequest) return '';
 
     return `
-5. COMPLEX TASK MODE: The app already suspects this request is complex, but you must still judge the request by meaning, not by keywords or UI language. Treat it as complex when it needs multiple steps, implementation, investigation, refactoring, review, or an execution plan.
-6. COMPLEX TASK FORMAT: For the first substantial assistant response, include these blocks in order when they add value:
+5. COMPLEX TASK MODE: The app already suspects this request may be complex, but you must still decide this yourself from the user's meaning, not from keywords or UI language. Before responding, quickly classify the request as either:
+   - QUICK RESPONSE: a simple answer, brief explanation, or single obvious action that does not need planning
+   - PLANNED TASK: work that needs multiple steps, implementation, investigation, refactoring, review, or coordination
+   Only use task-oriented structure when it is truly a PLANNED TASK.
+6. COMPLEX TASK FORMAT: For a PLANNED TASK, the first substantial assistant response may include these blocks in order when they add value:
    <analysis>Short diagnosis of the request and constraints</analysis>
    <tasklist title="Execution Plan" description="What will be handled end-to-end">
    1. Define or confirm the task breakdown
@@ -1646,7 +1626,7 @@ const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
    1. ...
    2. ...
    </report>
-7. COMPLEX TASK BEHAVIOR: Do not only propose a plan. Actually carry out the work, keep the task list aligned with the work performed, and finish with a completion report.`;
+7. COMPLEX TASK BEHAVIOR: If it is a QUICK RESPONSE, answer directly and do not create a task list, execution plan, or runbook framing. If it is a PLANNED TASK, do not only propose a plan. Actually carry out the work, keep the task list aligned with the work performed, and finish with a completion report.`;
 };
 
 const FOLLOW_UP_LLM_TIMEOUT_MS = 20000;
@@ -2980,7 +2960,7 @@ ${t('greeting')}`
         );
         const recentEvidence = evidenceLines.length > 0
             ? evidenceLines.join('\n')
-            : (toolResult.trim() || '(no observable terminal evidence)');
+            : (toolResult.trim() || '(no observable terminal details)');
         const assessmentHint = detectTerminalAssessmentHint(commandText, toolResult, combinedTerminal, promptRecovered, blocker, interactiveState);
 
         return {
@@ -3006,9 +2986,9 @@ ${t('greeting')}`
         baseSystemPrompt: string,
     ) => {
         const analysisPrompt = `${baseSystemPrompt}
-5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal action that was run, and a structured terminal status snapshot collected by the app. Answer the user's request directly using that evidence, not by describing the observation process.
-6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and mention the supporting evidence briefly. If it failed, start with "${t('workFailed')}" and explain why. If the result is still inconclusive, start with "${t('workIncomplete')}" and explain what is missing. Use SCREEN_CONTEXT only as supporting evidence when the terminal snapshot is ambiguous. Do not emit tool calls in this follow-up summary.
-7. Treat "assessment hint" as a hint, not a guaranteed truth. Prefer the concrete evidence lines when they contradict the hint.
+5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal action that was run, and a structured terminal status snapshot collected by the app. Answer the user's request directly from the observed terminal result, not by describing the observation process.
+6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and briefly weave in the most relevant terminal detail in a natural sentence. Do not add labels such as "증거:", "근거:", "evidence:", or bullet lists unless the user explicitly asked for them. If it failed, start with "${t('workFailed')}" and explain why. If the result is still inconclusive, start with "${t('workIncomplete')}" and explain what is missing. Use SCREEN_CONTEXT only as a secondary clue when the terminal snapshot is ambiguous. Do not emit tool calls in this follow-up summary.
+7. Treat "assessment hint" as a hint, not a guaranteed truth. Prefer the concrete terminal lines when they contradict the hint.
 8. If COMPLEX TASK MODE applies, preserve the same runbook style and end with a <report> block instead of a plain summary when possible.`;
 
         const observationBlock = [
@@ -3024,7 +3004,7 @@ ${t('greeting')}`
             `Blocker: ${observation.blocker || 'none'}`,
             `Tail available: ${observation.tailAvailable ? 'yes' : 'no'}`,
             '',
-            `[Recent terminal evidence]`,
+            `[Recent terminal details]`,
             observation.recentEvidence || '(none)',
         ].join('\n');
 
@@ -3396,7 +3376,7 @@ ${trimmedGlobalUserPrompt}
                 : '';
 
             const baseSystemPrompt = `You are ${mcpLabel}, a professional AI engineer. 
-1. Keep answers compact for a narrow side chat. Use <analysis>, <progress>, and <artifact> only when helpful.
+1. Keep answers compact for a narrow side chat. First decide whether the user's request needs a quick direct response or a planned multi-step task. Use <analysis>, <progress>, and <artifact> only when helpful.
 2. SCREEN_CONTEXT is only for visible UI/terminal/chat state. Do not use it as proof for files, paths, counts, command output, or other verifiable system facts when tools can check them.
 3. Tool syntax is strict. Use exactly one structured format for all tool calls:
    - Terminal command: <execute_command>{"command":"YOUR_COMMAND"}</execute_command>
@@ -3404,7 +3384,7 @@ ${trimmedGlobalUserPrompt}
    - Other tools: <tool_name>{"arg":"value"}</tool_name>
    Use only listed tools. Never invent file-edit tools. Do not use legacy wrappers like >>> ... <<< or [TOOL: ...].
 4. Use tools for terminal actions, system checks, files/paths, command results, latest web info, or page verification.
-5. Judge requests by meaning, not keywords, across all user languages.
+5. Judge requests by meaning, not keywords, across all user languages. Do not create a task list or plan unless the request genuinely needs one.
 6. If terminal control is stuck in an interactive program, recover with CTRL_C on macOS. If OS is Windows, use PowerShell syntax only.
 7. When the user asks for current events, recent facts, or web verification, prefer search_web instead of answering from memory when that tool is available.${buildTaskWorkflowPrompt(complexRequest)}
 Current OS: ${window.navigator.platform}
