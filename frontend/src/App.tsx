@@ -694,7 +694,16 @@ type TerminalObservation = {
     tail: string;
     combinedTerminal: string;
     recentEvidence: string;
+    lastMeaningfulLine: string;
+    changedSinceCommand: boolean;
     assessmentHint: string;
+};
+
+type PendingTerminalCommandObservation = {
+    commandText: string;
+    baselineVisible: string;
+    baselineBuffer: string;
+    startedAt: number;
 };
 
 const TERMINAL_CONTEXT_CHAR_LIMIT = 4000;
@@ -1817,6 +1826,7 @@ function App() {
     const fitTimeoutsRef = useRef<number[]>([]);
     const recentTerminalBuffersRef = useRef<Record<string, string>>({});
     const terminalCwdsRef = useRef<Record<string, string>>({});
+    const pendingTerminalObservationRef = useRef<Record<string, PendingTerminalCommandObservation>>({});
 
     const [tabs, setTabs] = useState<Tab[]>([{ id: '1', name: 'Tab 1' }]);
     const [activeTabId, setActiveTabId] = useState('1');
@@ -2438,6 +2448,7 @@ ${t('greeting')}`
         delete terminalContainersRef.current[id];
         delete recentTerminalBuffersRef.current[id];
         delete terminalCwdsRef.current[id];
+        delete pendingTerminalObservationRef.current[id];
         setTerminalCwds(prev => {
             const next = { ...prev };
             delete next[id];
@@ -2743,6 +2754,14 @@ ${t('greeting')}`
             throw new Error('command cannot be empty');
         }
 
+        await syncRecentTerminalContextBuffer(activeTabId);
+        pendingTerminalObservationRef.current[activeTabId] = {
+            commandText: normalized,
+            baselineVisible: getVisibleTerminalText(),
+            baselineBuffer: getRecentTerminalContextBuffer(activeTabId),
+            startedAt: Date.now(),
+        };
+
         await WriteToTerminal(activeTabId, `${normalized}\r`);
         return `Sent to terminal: ${normalized}`;
     };
@@ -2801,6 +2820,38 @@ ${t('greeting')}`
         }
     };
 
+    const countMatchingToolCallsInHistory = (history: Message[], toolName: string, toolArgs: string): number => {
+        const signature = serializeToolCallForHistory(toolName, toolArgs);
+        return history.reduce((count, message) => (
+            message.role === 'assistant' && message.content === signature ? count + 1 : count
+        ), 0);
+    };
+
+    const getAdaptiveBaseToolTemperature = (
+        history: Message[],
+        toolName: string,
+        toolArgs: string,
+        toolLoopCount: number,
+    ): { baseTemperature: number; repeatedCalls: number; loopPressure: boolean } => {
+        const repeatedCalls = countMatchingToolCallsInHistory(history, toolName, toolArgs);
+        const loopPressure = toolLoopCount >= 6;
+
+        let bump = 0;
+        if (repeatedCalls >= 3) {
+            bump += Math.min(0.24, (repeatedCalls - 2) * 0.08);
+        }
+        if (loopPressure) {
+            bump += 0.12;
+        }
+
+        const adjusted = Number(Math.min(0.6, toolTemperature + bump).toFixed(2));
+        return {
+            baseTemperature: adjusted,
+            repeatedCalls,
+            loopPressure,
+        };
+    };
+
     const continueAfterToolExecution = async (
         toolName: string,
         toolArgs: string,
@@ -2808,6 +2859,7 @@ ${t('greeting')}`
         historyToSend: Message[],
         baseSystemPrompt: string,
         responseSansCommand: string,
+        toolLoopCount = 1,
     ) => {
         appendToolResultToHistory(historyToSend, toolName, toolArgs, result);
         await syncRecentTerminalContextBuffer(activeTabId);
@@ -2818,12 +2870,17 @@ ${t('greeting')}`
         }
 
         const llmMessages = buildLLMMessages(historyToSend, baseSystemPrompt, { includeScreenContext: false });
+        const adaptive = getAdaptiveBaseToolTemperature(historyToSend, toolName, toolArgs, toolLoopCount);
         updateDebugTrace({
             requestMeta: maskSensitiveText([
                 `Provider: ${provider}`,
                 `Model: ${modelName}`,
                 `MaxTokens: ${maxTokens}`,
-                `Temperature: ${toolTemperature}`,
+                `Temperature: ${adaptive.baseTemperature}`,
+                `Configured Tool Temperature: ${toolTemperature}`,
+                `Base Tool Temperature: ${adaptive.baseTemperature}`,
+                `Repeated Tool Calls: ${adaptive.repeatedCalls}`,
+                `Loop Pressure: ${adaptive.loopPressure ? 'yes' : 'no'}`,
                 `Context Source: continueAfterToolExecution`,
             ].join('\n'), apiKey),
             requestMessages: maskSensitiveText(safeJsonStringify(llmMessages), apiKey),
@@ -2835,7 +2892,7 @@ ${t('greeting')}`
                 ? t('followUpDelayed')
                 : t('toolFollowUpDelayed').replace('{tool}', toolName),
             `continueAfterToolExecution:${toolName}`,
-            toolTemperature
+            adaptive.baseTemperature
         );
         return nextResponse;
     };
@@ -2872,6 +2929,80 @@ ${t('greeting')}`
             .filter(line => line.trim().length > 0);
 
         return lines.slice(-count);
+    };
+
+    const getLastMeaningfulTerminalLine = (terminalText: string): string => {
+        const lines = getRecentMeaningfulTerminalLines(terminalText, 1);
+        return lines[0] || '';
+    };
+
+    const delay = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
+
+    const extractNewTerminalLines = (before: string, after: string, maxLines = 10): string[] => {
+        const beforeLines = before
+            .split('\n')
+            .map(line => line.trimEnd())
+            .filter(line => line.trim().length > 0);
+        const afterLines = after
+            .split('\n')
+            .map(line => line.trimEnd())
+            .filter(line => line.trim().length > 0);
+
+        if (afterLines.length === 0) return [];
+        if (beforeLines.length === 0) return afterLines.slice(-maxLines);
+
+        let prefixLength = 0;
+        const comparableLength = Math.min(beforeLines.length, afterLines.length);
+        while (prefixLength < comparableLength && beforeLines[prefixLength] === afterLines[prefixLength]) {
+            prefixLength += 1;
+        }
+
+        const appended = afterLines.slice(prefixLength).filter(line => line.trim().length > 0);
+        if (appended.length > 0) return appended.slice(-maxLines);
+
+        const beforeLastLine = beforeLines[beforeLines.length - 1];
+        const lastBeforeIndexInAfter = afterLines.lastIndexOf(beforeLastLine);
+        if (lastBeforeIndexInAfter >= 0 && lastBeforeIndexInAfter < afterLines.length - 1) {
+            return afterLines.slice(lastBeforeIndexInAfter + 1).slice(-maxLines);
+        }
+
+        return afterLines.slice(-maxLines);
+    };
+
+    const waitForTerminalScreenIdle = async (
+        baselineVisible: string,
+        maxWaitMs = 5000,
+        idleMs = 1000,
+        pollMs = 150,
+    ): Promise<{ visibleTerminal: string; changedSinceCommand: boolean }> => {
+        const start = Date.now();
+        let latestVisible = getVisibleTerminalText();
+        let changedSinceCommand = latestVisible.trim() !== baselineVisible.trim();
+        let lastChangedAt = changedSinceCommand ? Date.now() : start;
+        let previousVisible = latestVisible;
+
+        while (Date.now() - start < maxWaitMs) {
+            await delay(pollMs);
+            const currentVisible = getVisibleTerminalText();
+
+            if (currentVisible !== previousVisible) {
+                previousVisible = currentVisible;
+                latestVisible = currentVisible;
+                changedSinceCommand = true;
+                lastChangedAt = Date.now();
+                continue;
+            }
+
+            latestVisible = currentVisible;
+            if (changedSinceCommand && Date.now() - lastChangedAt >= idleMs) {
+                break;
+            }
+        }
+
+        return {
+            visibleTerminal: latestVisible,
+            changedSinceCommand,
+        };
     };
 
 
@@ -2938,30 +3069,48 @@ ${t('greeting')}`
         commandText: string,
         toolResult: string,
     ): Promise<TerminalObservation> => {
-        const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 2500, idleMs: 900 });
+        const pendingObservation = toolName === 'execute_command'
+            ? pendingTerminalObservationRef.current[activeTabId]
+            : undefined;
+        const idleSnapshot = pendingObservation
+            ? await waitForTerminalScreenIdle(pendingObservation.baselineVisible, 5000, 1000, 150)
+            : { visibleTerminal: getVisibleTerminalText(), changedSinceCommand: false };
+
+        const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 2500, idleMs: 1000 });
         const { result: tail } = await callToolWithClientTimeout(
             'read_terminal_tail',
             tailArgs,
             '(terminal tail unavailable: client timeout while waiting for MCP acknowledgement)',
         );
-        const visibleTerminal = getVisibleTerminalText();
+        await syncRecentTerminalContextBuffer(activeTabId);
+        const visibleTerminal = idleSnapshot.visibleTerminal;
         const tailAvailable = !tail.includes('terminal tail unavailable');
-        const combinedTerminal = [visibleTerminal.trim(), tail.trim()].filter(Boolean).join('\n');
+        const recentBuffer = getRecentTerminalContextBuffer(activeTabId);
+        const combinedTerminal = [visibleTerminal.trim(), tail.trim(), recentBuffer.trim()].filter(Boolean).join('\n');
         const promptRecovered = hasRecoveredShellPrompt(visibleTerminal) || hasRecoveredShellPrompt(tail);
         const interactiveState = toolName === 'execute_command' && isInteractiveTerminalLaunch(commandText)
             ? detectInteractiveLaunchState(commandText, combinedTerminal)
             : null;
         const blocker = detectTerminalBlockerState(combinedTerminal);
-        const evidenceLines = getRecentMeaningfulTerminalLines(
-            tailAvailable
+        const commandDeltaLines = pendingObservation
+            ? extractNewTerminalLines(pendingObservation.baselineBuffer, recentBuffer, 10)
+            : [];
+        const preferredEvidenceSource = commandDeltaLines.length > 0
+            ? commandDeltaLines.join('\n')
+            : tailAvailable
                 ? (tail.trim() === '(no recent terminal output)' ? combinedTerminal : tail)
-                : combinedTerminal || toolResult,
-            10,
-        );
+                : combinedTerminal || toolResult;
+        const evidenceLines = getRecentMeaningfulTerminalLines(preferredEvidenceSource, 10);
         const recentEvidence = evidenceLines.length > 0
             ? evidenceLines.join('\n')
             : (toolResult.trim() || '(no observable terminal details)');
+        const lastMeaningfulLine = commandDeltaLines.length > 0
+            ? commandDeltaLines[commandDeltaLines.length - 1]
+            : getLastMeaningfulTerminalLine(visibleTerminal) || getLastMeaningfulTerminalLine(recentEvidence);
         const assessmentHint = detectTerminalAssessmentHint(commandText, toolResult, combinedTerminal, promptRecovered, blocker, interactiveState);
+        if (toolName === 'execute_command') {
+            delete pendingTerminalObservationRef.current[activeTabId];
+        }
 
         return {
             toolName,
@@ -2975,6 +3124,8 @@ ${t('greeting')}`
             tail,
             combinedTerminal,
             recentEvidence,
+            lastMeaningfulLine,
+            changedSinceCommand: pendingObservation ? idleSnapshot.changedSinceCommand : false,
             assessmentHint,
         };
     };
@@ -2987,7 +3138,7 @@ ${t('greeting')}`
     ) => {
         const analysisPrompt = `${baseSystemPrompt}
 5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal action that was run, and a structured terminal status snapshot collected by the app. Answer the user's request directly from the observed terminal result, not by describing the observation process.
-6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and briefly weave in the most relevant terminal detail in a natural sentence. Do not add labels such as "증거:", "근거:", "evidence:", or bullet lists unless the user explicitly asked for them. If it failed, start with "${t('workFailed')}" and explain why. If the result is still inconclusive, start with "${t('workIncomplete')}" and explain what is missing. Use SCREEN_CONTEXT only as a secondary clue when the terminal snapshot is ambiguous. Do not emit tool calls in this follow-up summary.
+6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and briefly weave in the most relevant terminal detail in a natural sentence. Treat "Last meaningful line after terminal idle" as the strongest clue for the latest command when it is available. Do not add labels such as "증거:", "근거:", "evidence:", or bullet lists unless the user explicitly asked for them. If it failed, start with "${t('workFailed')}" and explain why. If the result is still inconclusive, start with "${t('workIncomplete')}" and explain what is missing. Use SCREEN_CONTEXT only as a secondary clue when the terminal snapshot is ambiguous. Do not emit tool calls in this follow-up summary.
 7. Treat "assessment hint" as a hint, not a guaranteed truth. Prefer the concrete terminal lines when they contradict the hint.
 8. If COMPLEX TASK MODE applies, preserve the same runbook style and end with a <report> block instead of a plain summary when possible.`;
 
@@ -3000,6 +3151,8 @@ ${t('greeting')}`
             `[Structured terminal status]`,
             `Assessment hint: ${observation.assessmentHint}`,
             `Prompt recovered: ${observation.promptRecovered ? 'yes' : 'no'}`,
+            `Terminal changed since command: ${observation.changedSinceCommand ? 'yes' : 'no'}`,
+            `Last meaningful line after terminal idle: ${observation.lastMeaningfulLine || '(none)'}`,
             `Interactive state: ${observation.interactiveState || 'n/a'}`,
             `Blocker: ${observation.blocker || 'none'}`,
             `Tail available: ${observation.tailAvailable ? 'yes' : 'no'}`,
@@ -3557,13 +3710,14 @@ ${availableToolsSection}${globalUserPromptSection}`;
                         setCurrentThinking('');
                         currentThinkingRef.current = '';
                             setIsThinking(true);
-                            response = await continueAfterToolExecution(
+                        response = await continueAfterToolExecution(
                                 toolName,
                                 effectiveToolArgs,
                                 `Error: tool not available: ${toolName}. Use one of the explicitly available tools. For file creation on Windows, use <execute_command>{"command":"Set-Content ... or Out-File ..."}</execute_command> with PowerShell syntax.`,
                                 loopHistory,
                                 baseSystemPrompt,
                                 response,
+                                toolLoopCount,
                         );
                         if (!isCurrentRequest()) return;
                         setIsThinking(false);
@@ -3582,6 +3736,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
                             loopHistory,
                             baseSystemPrompt,
                             response,
+                            toolLoopCount,
                         );
                         if (!isCurrentRequest()) return;
                         setIsThinking(false);
@@ -3691,6 +3846,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
                                 loopHistory,
                                 baseSystemPrompt,
                                 response,
+                                toolLoopCount,
                             );
                             if (!isCurrentRequest()) return;
                             setIsThinking(false);
@@ -3746,7 +3902,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
                             apiKey,
                             modelName,
                             maxTokens,
-                            toolTemperature,
+                            Math.min(0.6, toolTemperature + (toolLoopCount >= 6 ? 0.12 : 0)),
                             provider,
                             true,
                             buildLLMMessages(contHistory, baseSystemPrompt, {
@@ -3866,6 +4022,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
             console.warn('[Terminal] Failed to clear terminal context buffer:', error);
         }
         recentTerminalBuffersRef.current[activeTabId] = t('terminalEmpty');
+        delete pendingTerminalObservationRef.current[activeTabId];
         setDebugTrace(createEmptyDebugTrace());
         const nextMessages: Message[] = [{
             role: 'assistant',
