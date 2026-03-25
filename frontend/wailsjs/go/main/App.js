@@ -26,6 +26,10 @@ export function GetRuntimePlatform() {
   return window['go']['main']['App']['GetRuntimePlatform']();
 }
 
+export function GetTerminalCwd(arg1) {
+  return window['go']['main']['App']['GetTerminalCwd'](arg1);
+}
+
 export function GetTools() {
   return window['go']['main']['App']['GetTools']();
 }

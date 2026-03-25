@@ -10,7 +10,7 @@ import '@xterm/xterm/css/xterm.css';
 import './App.css';
 import mcpDocsContent from './assets/docs/mcp.md?raw';
 import { getTranslation, Language } from './i18n/translations';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/main/App";
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/main/App";
 import { EventsOn, EventsEmit, WindowFullscreen, WindowIsFullscreen, WindowUnfullscreen } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
@@ -1836,6 +1836,7 @@ function App() {
     const fitAddonsRef = useRef<{ [id: string]: FitAddon | null }>({});
     const fitTimeoutsRef = useRef<number[]>([]);
     const recentTerminalBuffersRef = useRef<Record<string, string>>({});
+    const terminalCwdsRef = useRef<Record<string, string>>({});
 
     const [tabs, setTabs] = useState<Tab[]>([{ id: '1', name: 'Tab 1' }]);
     const [activeTabId, setActiveTabId] = useState('1');
@@ -1875,6 +1876,7 @@ function App() {
     const [debugPanelEnabled, setDebugPanelEnabled] = useState(() => localStorage.getItem('debugPanelEnabled') === 'true');
     const [debugPanelTab, setDebugPanelTab] = useState<DebugPanelTab>('context');
     const [debugTrace, setDebugTrace] = useState<DebugTrace>(() => createEmptyDebugTrace());
+    const [terminalCwds, setTerminalCwds] = useState<Record<string, string>>({});
     const [blockedCommandPatterns, setBlockedCommandPatterns] = useState(() => localStorage.getItem('blockedCommandPatterns') || DEFAULT_BLOCKED_COMMAND_PATTERNS);
     const [approvalCommandPatterns, setApprovalCommandPatterns] = useState(() => localStorage.getItem('approvalCommandPatterns') || DEFAULT_APPROVAL_COMMAND_PATTERNS);
     const isResizing = useRef(false);
@@ -2367,8 +2369,13 @@ ${t('greeting')}`
                     }
                 });
             });
+            const unoffCwd = EventsOn("terminal:cwd:" + tab.id, (cwd: string) => {
+                setTrackedTerminalCwd(tab.id, cwd);
+            });
             StartTerminal(tab.id);
+            void refreshTerminalCwd(tab.id);
             (term as any)._unoff = unoff;
+            (term as any)._unoffCwd = unoffCwd;
         });
 
         const handleResize = () => {
@@ -2398,6 +2405,7 @@ ${t('greeting')}`
         if (activeTabId) {
             scheduleTerminalFit(activeTabId);
             void syncRecentTerminalContextBuffer(activeTabId);
+            void refreshTerminalCwd(activeTabId);
         }
     }, [activeTabId, chatWidth, debugPanelEnabled]);
 
@@ -2438,11 +2446,19 @@ ${t('greeting')}`
         const term = xtermsRef.current[id];
         if (term) {
             (term as any)._unoff?.();
+            (term as any)._unoffCwd?.();
             term.dispose();
         }
         delete xtermsRef.current[id];
         delete fitAddonsRef.current[id];
         delete terminalContainersRef.current[id];
+        delete recentTerminalBuffersRef.current[id];
+        delete terminalCwdsRef.current[id];
+        setTerminalCwds(prev => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+        });
         StopTerminal(id);
         const newTabs = tabs.filter(t => t.id !== id);
         setTabs(newTabs);
@@ -2489,6 +2505,13 @@ ${t('greeting')}`
             const buffer = await GetRecentTerminalBuffer(tabId, TERMINAL_CONTEXT_CHAR_LIMIT);
             const normalized = compactTerminalContext(buffer || '');
             recentTerminalBuffersRef.current[tabId] = normalized || t('terminalEmpty');
+            const inferredCwd = inferWorkingDirectoryFromTerminalText(
+                recentTerminalBuffersRef.current[tabId],
+                terminalCwdsRef.current[tabId] || terminalCwds[tabId],
+            );
+            if (inferredCwd) {
+                setTrackedTerminalCwd(tabId, inferredCwd);
+            }
             return recentTerminalBuffersRef.current[tabId];
         } catch {
             const fallback = recentTerminalBuffersRef.current[tabId] || t('terminalEmpty');
@@ -2501,6 +2524,91 @@ ${t('greeting')}`
         recentTerminalBuffersRef.current[tabId] || t('terminalEmpty')
     );
 
+    const inferWorkingDirectoryFromTerminalText = (terminalText: string, previousCwd?: string): string => {
+        const lines = terminalText
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean)
+            .slice(-12)
+            .reverse();
+
+        for (const line of lines) {
+            const powerShellMatch = line.match(/([A-Za-z]:\\[^>\r\n]*)>\s*$/);
+            if (powerShellMatch) {
+                return powerShellMatch[1].trim();
+            }
+
+            const posixPromptMatch = line.match(/(?:^|\s)(~\/[^\s%#$]*)\s[%#$]\s*$/) || line.match(/(?:^|\s)(\/[^\s%#$]*)\s[%#$]\s*$/);
+            if (posixPromptMatch) {
+                return posixPromptMatch[1].trim();
+            }
+
+            const shortPromptMatch = line.match(/(?:^|\s)(~|[A-Za-z0-9._-]+)\s[%#$]\s*$/);
+            if (shortPromptMatch && previousCwd) {
+                const token = shortPromptMatch[1].trim();
+                if (token === '~') {
+                    const homeCandidate = previousCwd.startsWith('/Users/') || previousCwd.startsWith('/home/') ? previousCwd.replace(/\/[^/]*$/, '') : previousCwd;
+                    if (homeCandidate) return homeCandidate;
+                }
+                const normalizedPrevious = previousCwd.replace(/\/+$/, '');
+                const previousBase = normalizedPrevious.split('/').pop();
+                if (token === previousBase) {
+                    return normalizedPrevious;
+                }
+                if (!token.includes('/') && normalizedPrevious) {
+                    return `${normalizedPrevious.replace(/\/[^/]*$/, '')}/${token}`;
+                }
+            }
+        }
+
+        return '';
+    };
+
+    const setTrackedTerminalCwd = (tabId: string, cwd: string) => {
+        const normalized = cwd.trim();
+        if (!tabId || !normalized) return;
+        terminalCwdsRef.current[tabId] = normalized;
+        setTerminalCwds(prev => prev[tabId] === normalized ? prev : { ...prev, [tabId]: normalized });
+    };
+
+    const getKnownTerminalCwd = (tabId: string): string => {
+        const tracked = (terminalCwdsRef.current[tabId] || terminalCwds[tabId] || '').trim();
+        if (tracked) return tracked;
+
+        const inferred = inferWorkingDirectoryFromTerminalText(
+            getRecentTerminalContextBuffer(tabId),
+            terminalCwdsRef.current[tabId] || terminalCwds[tabId],
+        ).trim();
+        if (inferred) {
+            setTrackedTerminalCwd(tabId, inferred);
+            return inferred;
+        }
+        return '';
+    };
+
+    const refreshTerminalCwd = async (tabId: string) => {
+        if (!tabId) return '';
+
+        try {
+            const cwd = (await GetTerminalCwd(tabId)).trim();
+            if (cwd) {
+                setTrackedTerminalCwd(tabId, cwd);
+                return cwd;
+            }
+        } catch {
+            // Fall through to heuristic inference.
+        }
+
+        const inferred = inferWorkingDirectoryFromTerminalText(
+            getRecentTerminalContextBuffer(tabId),
+            terminalCwdsRef.current[tabId] || terminalCwds[tabId],
+        ).trim();
+        if (inferred) {
+            setTrackedTerminalCwd(tabId, inferred);
+        }
+        return inferred;
+    };
+
     const shouldIncludeScreenContext = (history: Message[]): boolean => {
         return history.length > 0 && shouldAttachScreenContext(history);
     };
@@ -2511,6 +2619,7 @@ ${t('greeting')}`
 
         return [
             `TAB: ${activeTab?.name || activeTabId}`,
+            `CURRENT_WORKING_DIRECTORY: ${getKnownTerminalCwd(activeTabId) || '(unknown)'}`,
             `WIDTH: ${chatWidth}px`,
             'TERMINAL:',
             clampTextFromEnd(getRecentTerminalContextBuffer(activeTabId), 700),
@@ -3253,6 +3362,7 @@ ${t('greeting')}`
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
             const complexRequest = shouldUseComplexTaskMode(trimmedInput);
             const availableToolsSection = renderAvailableToolsForPrompt(activeTools);
+            const currentWorkingDirectory = getKnownTerminalCwd(activeTabId) || '(unknown)';
             const trimmedGlobalUserPrompt = globalUserPrompt.trim();
             const globalUserPromptSection = trimmedGlobalUserPrompt
                 ? `
@@ -3277,6 +3387,7 @@ ${trimmedGlobalUserPrompt}
 6. If terminal control is stuck in an interactive program, recover with CTRL_C on macOS. If OS is Windows, use PowerShell syntax only.
 7. When the user asks for current events, recent facts, or web verification, prefer search_web instead of answering from memory when that tool is available.${buildTaskWorkflowPrompt(complexRequest)}
 Current OS: ${window.navigator.platform}
+Current Working Directory: ${currentWorkingDirectory}
 Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}
 
 ${availableToolsSection}${globalUserPromptSection}`;

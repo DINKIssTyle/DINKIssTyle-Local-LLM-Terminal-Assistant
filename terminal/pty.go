@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,16 +24,22 @@ type Terminal struct {
 	cmd        *pty.Cmd
 	mu         sync.Mutex
 	onData     func(data string)
+	onCwd      func(cwd string)
 	cancel     context.CancelFunc
 	outputTail string
 	lastDataAt time.Time
+	cwd        string
+	shellPath  string
+	shellKind  string
+	pendingOSC string
 }
 
 const maxOutputTailBytes = 256 * 1024
 
-func NewTerminal(onData func(data string)) *Terminal {
+func NewTerminal(onData func(data string), onCwd func(cwd string)) *Terminal {
 	return &Terminal{
 		onData: onData,
+		onCwd:  onCwd,
 	}
 }
 
@@ -75,6 +82,8 @@ func (t *Terminal) Start() error {
 
 	t.pty = p
 	t.cmd = c
+	t.shellPath = shell
+	t.shellKind = detectShellKind(shell)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
@@ -96,10 +105,21 @@ func (t *Terminal) Start() error {
 				}
 				if n > 0 {
 					chunk := string(buf[:n])
-					t.appendOutput(chunk)
-					t.onData(chunk)
+					visible := t.processTerminalChunk(chunk)
+					if visible == "" {
+						continue
+					}
+					t.appendOutput(visible)
+					t.onData(visible)
 				}
 			}
+		}
+	}()
+
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		if err := t.installCwdTracking(); err != nil {
+			log.Printf("PTY cwd tracking init failed: %v", err)
 		}
 	}()
 
@@ -125,6 +145,109 @@ func (t *Terminal) appendOutput(data string) {
 		t.outputTail = t.outputTail[len(t.outputTail)-maxOutputTailBytes:]
 	}
 	t.lastDataAt = time.Now()
+}
+
+func detectShellKind(shell string) string {
+	base := strings.ToLower(filepath.Base(shell))
+	switch base {
+	case "zsh":
+		return "zsh"
+	case "bash":
+		return "bash"
+	case "fish":
+		return "fish"
+	case "powershell.exe", "powershell":
+		return "powershell"
+	case "pwsh.exe", "pwsh":
+		return "pwsh"
+	default:
+		if runtime.GOOS == "windows" {
+			return "powershell"
+		}
+		return base
+	}
+}
+
+func (t *Terminal) processTerminalChunk(chunk string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	combined := t.pendingOSC + chunk
+	t.pendingOSC = ""
+
+	var builder strings.Builder
+	for len(combined) > 0 {
+		start := strings.Index(combined, "\x1b]633;cwd=")
+		if start < 0 {
+			builder.WriteString(combined)
+			break
+		}
+
+		builder.WriteString(combined[:start])
+		rest := combined[start+len("\x1b]633;cwd="):]
+		belIdx := strings.Index(rest, "\x07")
+		stIdx := strings.Index(rest, "\x1b\\")
+
+		terminatorIdx := -1
+		terminatorLen := 0
+		if belIdx >= 0 {
+			terminatorIdx = belIdx
+			terminatorLen = 1
+		}
+		if stIdx >= 0 && (terminatorIdx < 0 || stIdx < terminatorIdx) {
+			terminatorIdx = stIdx
+			terminatorLen = 2
+		}
+
+		if terminatorIdx < 0 {
+			t.pendingOSC = combined[start:]
+			break
+		}
+
+		cwd := strings.TrimSpace(rest[:terminatorIdx])
+		if cwd != "" && cwd != t.cwd {
+			t.cwd = cwd
+			if t.onCwd != nil {
+				go t.onCwd(cwd)
+			}
+		}
+
+		combined = rest[terminatorIdx+terminatorLen:]
+	}
+
+	return builder.String()
+}
+
+func (t *Terminal) installCwdTracking() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.pty == nil {
+		return io.ErrClosedPipe
+	}
+
+	var initScript string
+	switch t.shellKind {
+	case "zsh":
+		initScript = "if [[ -z \"${__DKST_CWD_HOOK:-}\" ]]; then function __dkst_emit_cwd() { printf '\\033]633;cwd=%s\\a' \"$PWD\"; }; if (( ${precmd_functions[(I)__dkst_emit_cwd]} == 0 )); then precmd_functions+=(__dkst_emit_cwd); fi; typeset -gx __DKST_CWD_HOOK=1; __dkst_emit_cwd; clear; fi\r"
+	case "bash":
+		initScript = "if [ -z \"${__DKST_CWD_HOOK:-}\" ]; then __dkst_emit_cwd() { printf '\\033]633;cwd=%s\\a' \"$PWD\"; }; case \";$PROMPT_COMMAND;\" in *__dkst_emit_cwd* ) ;; * ) PROMPT_COMMAND=\"__dkst_emit_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}\" ;; esac; export __DKST_CWD_HOOK=1; __dkst_emit_cwd; clear; fi\r"
+	case "fish":
+		initScript = "if not set -q __DKST_CWD_HOOK; function __dkst_emit_cwd; printf '\\033]633;cwd=%s\\a' \"$PWD\"; end; if functions -q fish_prompt; functions -c fish_prompt __dkst_original_fish_prompt; function fish_prompt; __dkst_emit_cwd; __dkst_original_fish_prompt; end; end; set -gx __DKST_CWD_HOOK 1; __dkst_emit_cwd; clear; end\r"
+	case "powershell", "pwsh":
+		initScript = "if (-not $global:__DKST_CWD_HOOK) { function global:__dkst_emit_cwd { $Host.UI.Write(\"`e]633;cwd=$($PWD.Path)`a\") }; if (-not $global:__DKST_OriginalPrompt) { $global:__DKST_OriginalPrompt = $function:prompt }; function global:prompt { __dkst_emit_cwd; if ($global:__DKST_OriginalPrompt) { & $global:__DKST_OriginalPrompt } else { \"PS $($executionContext.SessionState.Path.CurrentLocation)> \" } }; $global:__DKST_CWD_HOOK = $true; __dkst_emit_cwd; Clear-Host }\r"
+	default:
+		return nil
+	}
+
+	_, err := t.pty.Write([]byte(initScript))
+	return err
+}
+
+func (t *Terminal) CurrentDirectory() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(t.cwd)
 }
 
 func (t *Terminal) TailLines(lines int) string {

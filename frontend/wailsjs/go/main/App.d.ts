@@ -14,6 +14,8 @@ export function GetRecentTerminalBuffer(arg1:string,arg2:number):Promise<string>
 
 export function GetRuntimePlatform():Promise<string>;
 
+export function GetTerminalCwd(arg1:string):Promise<string>;
+
 export function GetTools():Promise<Array<mcp.Tool>>;
 
 export function Greet(arg1:string):Promise<string>;

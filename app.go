@@ -568,6 +568,7 @@ func (a *App) sendLMStudioChatWithRecovery(
 type App struct {
 	ctx               context.Context
 	terminals         map[string]*terminal.Terminal
+	terminalCwds      map[string]string
 	activeTabId       string
 	mcpPort           int
 	mcpLabel          string
@@ -581,6 +582,7 @@ type App struct {
 func NewApp() *App {
 	return &App{
 		terminals:         make(map[string]*terminal.Terminal),
+		terminalCwds:      make(map[string]string),
 		lastCommandCursor: make(map[string]int),
 	}
 }
@@ -665,6 +667,11 @@ func (a *App) StartTerminal(id string) error {
 
 	term := terminal.NewTerminal(func(data string) {
 		runtime.EventsEmit(a.ctx, "terminal:data:"+id, data)
+	}, func(cwd string) {
+		a.mu.Lock()
+		a.terminalCwds[id] = cwd
+		a.mu.Unlock()
+		runtime.EventsEmit(a.ctx, "terminal:cwd:"+id, cwd)
 	})
 
 	if err := term.Start(); err != nil {
@@ -672,6 +679,9 @@ func (a *App) StartTerminal(id string) error {
 	}
 
 	a.terminals[id] = term
+	if cwd := strings.TrimSpace(term.CurrentDirectory()); cwd != "" {
+		a.terminalCwds[id] = cwd
+	}
 	return nil
 }
 
@@ -711,6 +721,7 @@ func (a *App) StopTerminal(id string) error {
 
 	term.Stop()
 	delete(a.terminals, id)
+	delete(a.terminalCwds, id)
 	delete(a.lastCommandCursor, id)
 	return nil
 }
@@ -782,6 +793,28 @@ func (a *App) GetRecentTerminalBuffer(id string, maxChars int) (string, error) {
 	}
 
 	return buffer, nil
+}
+
+func (a *App) GetTerminalCwd(id string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if cwd := strings.TrimSpace(a.terminalCwds[id]); cwd != "" {
+		return cwd, nil
+	}
+
+	term, exists := a.terminals[id]
+	if !exists {
+		return "", fmt.Errorf("terminal session %s not found", id)
+	}
+
+	cwd := strings.TrimSpace(term.CurrentDirectory())
+	if cwd == "" {
+		return "", fmt.Errorf("terminal session %s cwd unavailable", id)
+	}
+
+	a.terminalCwds[id] = cwd
+	return cwd, nil
 }
 
 func (a *App) ClearTerminalContext(id string) error {
