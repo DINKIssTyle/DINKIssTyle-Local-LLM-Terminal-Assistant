@@ -567,7 +567,7 @@ function renderMarkdown(text: string): string {
 function getPermissionHint(platform: string, t: (key: Parameters<typeof getTranslation>[1]) => string): string {
     switch (platform) {
         case 'darwin':
-            return t('permissionsMacHint');
+            return `${t('permissionsMacHint')} ${t('permissionsMacTccReset')}`;
         case 'windows':
             return t('permissionsWindowsHint');
         default:

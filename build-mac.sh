@@ -37,10 +37,13 @@ if [ ! -d "${APP_PATH}" ]; then
     exit 1
 fi
 
-if [ -n "${CODESIGN_IDENTITY}" ]; then
-    echo "[INFO] Codesigning app with identity: ${CODESIGN_IDENTITY}"
-    codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${APP_PATH}"
-fi
+# Sign the app (Ad-hoc if no identity is provided, otherwise use current identity)
+# Using entitlements helps macOS understand app capabilities and can reduce recurring TCC prompts.
+SIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+ENTITLEMENTS="build/darwin/entitlements.plist"
+
+echo "[INFO] Signing app with identity: ${SIGN_IDENTITY} using ${ENTITLEMENTS}..."
+codesign --force --deep --options=runtime --sign "${SIGN_IDENTITY}" --entitlements "${ENTITLEMENTS}" "${APP_PATH}"
 
 echo "[SUCCESS] Build complete: ${APP_PATH}"
 echo "[INFO] Bundle identifier is fixed in build/darwin/Info.plist as com.dinkisstyle.dkstterminalassistant"
