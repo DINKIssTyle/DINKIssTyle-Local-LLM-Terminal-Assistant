@@ -592,69 +592,71 @@ func NewApp() *App {
 // so we can call the runtime methods
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
-	// Register the terminal executor for MCP tools
-	mcp.TerminalExecutor = func(command string) (string, error) {
-		a.mu.Lock()
-		activeId := a.activeTabId
-		a.mu.Unlock()
+	mcp.SetHost(mcp.ToolHostFuncs{
+		ExecuteCommandFunc: func(command string) (string, error) {
+			a.mu.Lock()
+			activeId := a.activeTabId
+			a.mu.Unlock()
 
-		if activeId == "" {
-			return "", fmt.Errorf("no active terminal tab")
-		}
+			if activeId == "" {
+				return "", fmt.Errorf("no active terminal tab")
+			}
 
-		normalized := strings.TrimSpace(command)
-		if normalized == "" {
-			return "", fmt.Errorf("command cannot be empty")
-		}
+			normalized := strings.TrimSpace(command)
+			if normalized == "" {
+				return "", fmt.Errorf("command cannot be empty")
+			}
 
-		normalized = unwrapWindowsPowerShellCommand(normalized)
-		normalized = normalizeCommandForTerminal(normalized)
+			normalized = unwrapWindowsPowerShellCommand(normalized)
+			normalized = normalizeCommandForTerminal(normalized)
 
-		a.mu.Lock()
-		term := a.terminals[activeId]
-		if term != nil {
-			a.lastCommandCursor[activeId] = term.OutputCursor()
-		}
-		a.mu.Unlock()
+			a.mu.Lock()
+			term := a.terminals[activeId]
+			if term != nil {
+				a.lastCommandCursor[activeId] = term.OutputCursor()
+			}
+			a.mu.Unlock()
 
-		if err := a.WriteToTerminal(activeId, normalized+terminalCommandSuffix()); err != nil {
-			return "", err
-		}
+			if err := a.WriteToTerminal(activeId, normalized+terminalCommandSuffix()); err != nil {
+				return "", err
+			}
 
-		return fmt.Sprintf("Sent to terminal: %s", normalized), nil
-	}
-	mcp.TerminalKeyExecutor = func(keys []string) (string, error) {
-		if isAppNewTabShortcut(keys) {
-			runtime.EventsEmit(a.ctx, "app:new-tab")
-			return fmt.Sprintf("Opened a new app tab via shortcut %v", keys), nil
-		}
-		if tabIndex, ok := appTabSwitchIndex(keys); ok {
-			runtime.EventsEmit(a.ctx, "app:switch-tab", tabIndex)
-			return fmt.Sprintf("Switched to app tab index %d via shortcut %v", tabIndex, keys), nil
-		}
+			return fmt.Sprintf("Sent to terminal: %s", normalized), nil
+		},
+		SendKeysFunc: func(keys []string) (string, error) {
+			if isAppNewTabShortcut(keys) {
+				runtime.EventsEmit(a.ctx, "app:new-tab")
+				return fmt.Sprintf("Opened a new app tab via shortcut %v", keys), nil
+			}
+			if tabIndex, ok := appTabSwitchIndex(keys); ok {
+				runtime.EventsEmit(a.ctx, "app:switch-tab", tabIndex)
+				return fmt.Sprintf("Switched to app tab index %d via shortcut %v", tabIndex, keys), nil
+			}
 
-		a.mu.Lock()
-		activeId := a.activeTabId
-		a.mu.Unlock()
+			a.mu.Lock()
+			activeId := a.activeTabId
+			a.mu.Unlock()
 
-		if activeId == "" {
-			return "", fmt.Errorf("no active terminal tab")
-		}
+			if activeId == "" {
+				return "", fmt.Errorf("no active terminal tab")
+			}
 
-		encoded, err := encodeTerminalKeys(keys)
-		if err != nil {
-			return "", err
-		}
+			encoded, err := encodeTerminalKeys(keys)
+			if err != nil {
+				return "", err
+			}
 
-		if err := a.WriteToTerminal(activeId, encoded); err != nil {
-			return "", err
-		}
+			if err := a.WriteToTerminal(activeId, encoded); err != nil {
+				return "", err
+			}
 
-		return fmt.Sprintf("Keys %v sent to active terminal (Tab ID: %s)", keys, activeId), nil
-	}
-	mcp.TerminalTailReader = func(lines int, maxWaitMs int, idleMs int) (string, error) {
-		return a.ReadActiveTerminalTail(lines, maxWaitMs, idleMs)
-	}
+			return fmt.Sprintf("Keys %v sent to active terminal (Tab ID: %s)", keys, activeId), nil
+		},
+		ReadTerminalTailFunc: func(lines int, maxWaitMs int, idleMs int) (string, error) {
+			return a.ReadActiveTerminalTail(lines, maxWaitMs, idleMs)
+		},
+	})
+	mcp.SetContext("default", false, nil, "", nil, nil)
 }
 
 // StartTerminal starts the shell process for a specific ID
@@ -867,7 +869,7 @@ func (a *App) GetTools() []mcp.Tool {
 
 // CallTool executes an MCP tool
 func (a *App) CallTool(name string, arguments string) (string, error) {
-	return mcp.ExecuteToolByName(name, arguments)
+	return mcp.ExecuteToolByName(name, []byte(arguments), "default", false, nil)
 }
 
 // StopLLMResponse cancels the current LLM request

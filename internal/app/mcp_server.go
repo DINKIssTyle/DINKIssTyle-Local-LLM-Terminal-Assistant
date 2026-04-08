@@ -144,7 +144,7 @@ func (s *MCPServer) buildResponse(req *mcpJSONRPCRequest) *mcpJSONRPCResponse {
 			return resp
 		}
 
-		res, callErr := mcp.ExecuteToolByName(params.Name, string(params.Arguments))
+		res, callErr := mcp.ExecuteToolByName(params.Name, params.Arguments, "default", false, nil)
 		if callErr != nil {
 			resp.Error = map[string]interface{}{"code": -32603, "message": callErr.Error()}
 		} else {
