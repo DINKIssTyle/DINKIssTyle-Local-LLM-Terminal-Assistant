@@ -13,7 +13,7 @@ if [ -d "$HOME/go/bin" ]; then
     export PATH="$HOME/go/bin:$PATH"
 fi
 
-echo "[INFO] Starting Linux build for DKST Terminal Assistant..."
+echo "[INFO] Starting Linux build for DKST Terminal AI..."
 echo "[INFO] Using $(go version)"
 
 # Check Go version (requires 1.24+)
@@ -54,9 +54,9 @@ cd ..
 
 # Run wails build
 echo "[INFO] Running wails build..."
-wails build -platform linux/amd64 -o "DKST Terminal Assistant"
+wails build -platform linux/amd64 -o "DKST Terminal AI"
 
 # Cleanup shim
 rm -rf .pkgconfig
 
-echo "[SUCCESS] Build complete: build/bin/DKST Terminal Assistant"
+echo "[SUCCESS] Build complete: build/bin/DKST Terminal AI"

@@ -3,10 +3,10 @@
 
 set -e
 
-APP_NAME="DKST Terminal Assistant"
+APP_NAME="DKST Terminal AI"
 APP_PATH="build/bin/${APP_NAME}.app"
 
-echo "[INFO] Starting macOS build for DKST Terminal Assistant..."
+echo "[INFO] Starting macOS build for DKST Terminal AI..."
 
 # Ensure frontend is built
 echo "[INFO] Building frontend..."
@@ -46,5 +46,5 @@ echo "[INFO] Signing app with identity: ${SIGN_IDENTITY} using ${ENTITLEMENTS}..
 codesign --force --deep --options=runtime --sign "${SIGN_IDENTITY}" --entitlements "${ENTITLEMENTS}" "${APP_PATH}"
 
 echo "[SUCCESS] Build complete: ${APP_PATH}"
-echo "[INFO] Bundle identifier is fixed in build/darwin/Info.plist as com.dinkisstyle.dkstterminalassistant"
+echo "[INFO] Bundle identifier is fixed in build/darwin/Info.plist as com.dinkisstyle.terminalai"
 echo "[INFO] For stable macOS permissions, run the same signed app bundle from a fixed location such as /Applications."

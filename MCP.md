@@ -3,7 +3,7 @@
 Created by DINKIssTyle on 2026.
 Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 
-본 문서는 `DKST Terminal Assistant` 프로젝트에서 LM Studio와 연동 중 발생했던 **MCP 등록 타임아웃 문제**의 원인과 이를 해결한 방법에 대해 상세히 기록합니다.
+본 문서는 `DKST Terminal AI` 프로젝트에서 LM Studio와 연동 중 발생했던 **MCP 등록 타임아웃 문제**의 원인과 이를 해결한 방법에 대해 상세히 기록합니다.
 
 ---
 

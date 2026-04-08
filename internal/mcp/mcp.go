@@ -1,6 +1,6 @@
 /*
-    Created by DINKIssTyle on 2026.
-    Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
+   Created by DINKIssTyle on 2026.
+   Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 */
 
 package mcp
@@ -108,9 +108,9 @@ func GetToolList() []Tool {
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"lines": map[string]interface{}{"type": "integer", "description": "How many recent lines to return. Defaults to 40."},
+					"lines":     map[string]interface{}{"type": "integer", "description": "How many recent lines to return. Defaults to 40."},
 					"maxWaitMs": map[string]interface{}{"type": "integer", "description": "How long to wait for terminal output to go idle before reading. Defaults to 0."},
-					"idleMs": map[string]interface{}{"type": "integer", "description": "How long output must stay quiet to count as idle. Defaults to 1200."},
+					"idleMs":    map[string]interface{}{"type": "integer", "description": "How long output must stay quiet to count as idle. Defaults to 1200."},
 				},
 			},
 		},

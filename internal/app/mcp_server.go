@@ -1,11 +1,12 @@
 /*
-    Created by DINKIssTyle on 2026.
-    Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
+   Created by DINKIssTyle on 2026.
+   Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 */
 
-package main
+package app
 
 import (
+	"dkst-terminal-assistant/internal/mcp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +15,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-	"dkst-terminal-assistant/mcp"
 )
 
 type mcpJSONRPCRequest struct {
@@ -76,7 +76,7 @@ func (s *MCPServer) broadcast(payload string) int {
 
 func (s *MCPServer) Start(port int) {
 	mux := http.NewServeMux()
-	
+
 	mux.HandleFunc("/mcp/sse", s.handleSSE)
 	mux.HandleFunc("/mcp/messages", s.handleMessage)
 	mux.HandleFunc("/tools", s.handleTools)

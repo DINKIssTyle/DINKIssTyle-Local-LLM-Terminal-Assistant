@@ -3,7 +3,7 @@ Created by DINKIssTyle on 2026.
 Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 -->
 
-# DKST Terminal Assistant
+# DKST Terminal AI
 
 ## 한국어 소개 (Korean)
 
@@ -17,9 +17,9 @@ Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 ### 빌드 방법
 각 운영체제에 맞는 아래의 전용 빌드 스크립트를 사용하여 애플리케이션을 빌드할 수 있습니다.
 
-- **macOS**: `./build-mac.sh` 실행
-- **Linux**: `./build-linux.sh` 실행
-- **Windows**: `build-win.bat` 실행
+- **macOS**: `./build-macOS.sh` 실행
+- **Linux**: `./build-Linux.sh` 실행
+- **Windows**: `build-Windows.bat` 실행
 
 ---
 
@@ -35,6 +35,6 @@ This application is an optimized Terminal Assistant designed for Local LLMs, par
 ### How to Build
 You can build the application using the OS-specific build scripts provided in the root directory.
 
-- **macOS**: Run `./build-mac.sh`
-- **Linux**: Run `./build-linux.sh`
-- **Windows**: Run `build-win.bat`
+- **macOS**: Run `./build-macOS.sh`
+- **Linux**: Run `./build-Linux.sh`
+- **Windows**: Run `build-Windows.bat`

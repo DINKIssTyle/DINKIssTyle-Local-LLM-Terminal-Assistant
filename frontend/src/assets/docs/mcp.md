@@ -1,9 +1,9 @@
-# 🧩 DKST Terminal Assistant MCP 서버 설정
+# 🧩 DKST Terminal AI MCP 서버 설정
 
 ## 📄 기본 설정
 
 `mcp.json` 파일에 아래 내용을 작성하면  
-DKST Terminal Assistant MCP 서버를 등록할 수 있습니다.
+DKST Terminal AI MCP 서버를 등록할 수 있습니다.
 
 ```json
 {
@@ -46,12 +46,12 @@ mcpServers 내부에 함께 추가하면 됩니다.
 
 
 
-# 🧩 DKST Terminal Assistant MCP Server Setup
+# 🧩 DKST Terminal AI MCP Server Setup
 
 ## 📄 Basic Configuration
 
 Add the following content to your `mcp.json` file  
-to register the DKST Terminal Assistant MCP server.
+to register the DKST Terminal AI MCP server.
 
 ```json
 {

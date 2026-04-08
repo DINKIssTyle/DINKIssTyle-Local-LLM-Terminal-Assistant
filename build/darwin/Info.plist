@@ -4,11 +4,11 @@
         <key>CFBundlePackageType</key>
         <string>APPL</string>
         <key>CFBundleName</key>
-        <string>DKST Terminal Assistant</string>
+        <string>DKST Terminal AI</string>
         <key>CFBundleExecutable</key>
-        <string>DKST Terminal Assistant</string>
+        <string>DKST Terminal AI</string>
         <key>CFBundleIdentifier</key>
-        <string>com.dinkisstyle.dkstterminalassistant</string>
+        <string>com.dinkisstyle.terminalai</string>
         <key>CFBundleVersion</key>
         <string>{{.Info.ProductVersion}}</string>
         <key>CFBundleGetInfoString</key>

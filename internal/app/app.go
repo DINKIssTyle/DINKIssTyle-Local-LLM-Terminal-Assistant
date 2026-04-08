@@ -3,14 +3,12 @@
    Copyright (C) 2026 DINKI'ssTyle. All rights reserved.
 */
 
-package main
+package app
 
 import (
 	"bufio"
 	"bytes"
 	"context"
-	"dkst-terminal-assistant/mcp"
-	"dkst-terminal-assistant/terminal"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +20,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"dkst-terminal-assistant/internal/mcp"
+	"dkst-terminal-assistant/internal/terminal"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -589,7 +590,7 @@ func NewApp() *App {
 
 // startup is called when the app starts. The context is saved
 // so we can call the runtime methods
-func (a *App) startup(ctx context.Context) {
+func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 	// Register the terminal executor for MCP tools
 	mcp.TerminalExecutor = func(command string) (string, error) {

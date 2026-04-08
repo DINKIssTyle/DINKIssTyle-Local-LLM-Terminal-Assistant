@@ -10,7 +10,16 @@ import '@xterm/xterm/css/xterm.css';
 import './App.css';
 import mcpDocsContent from './assets/docs/mcp.md?raw';
 import { getTranslation, Language } from './i18n/translations';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/main/App";
+import {
+    buildBaseSystemPrompt,
+    buildCompactVisibleChat,
+    buildLLMMessages,
+    clampPromptTextFromEnd,
+    getPromptVisibleTools,
+    shouldAttachScreenContext,
+    shouldUseComplexTaskMode,
+} from './prompt/harness';
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/app/App";
 import { EventsOn, EventsEmit, WindowFullscreen, WindowIsFullscreen, WindowUnfullscreen } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
@@ -612,16 +621,6 @@ type DebugTrace = {
     updatedAt: number | null;
 };
 
-type TaskMemory = {
-    request: string;
-    stage: 'plan' | 'execute' | 'inspect' | 'finalize';
-    recentRequests: string[];
-    planItems: string[];
-    stepResults: string[];
-    latestEvidence: string[];
-    draftResponse: string;
-};
-
 const ASSISTANT_DISPLAY_NAME = 'Assistant';
 const DEFAULT_BLOCKED_COMMAND_PATTERNS = [
     'rm -rf /',
@@ -707,11 +706,6 @@ type PendingTerminalCommandObservation = {
 };
 
 const TERMINAL_CONTEXT_CHAR_LIMIT = 4000;
-const TASK_MEMORY_REQUEST_LIMIT = 3;
-const TASK_MEMORY_PLAN_LIMIT = 6;
-const TASK_MEMORY_STEP_LIMIT = 6;
-const TASK_MEMORY_EVIDENCE_LIMIT = 2;
-const TASK_MEMORY_RECENT_MESSAGE_LIMIT = 6;
 const INTERNAL_ONLY_TOOL_NAMES = new Set(['read_terminal_tail']);
 const DEFAULT_ENABLED_TOOLS = ['search_web', 'read_web_page', 'get_current_time', 'execute_command', 'send_keys', 'naver_search', 'namu_wiki'];
 
@@ -1300,268 +1294,10 @@ const getAppTabSwitchIndex = (keys: string[]): number | null => {
     return digit === '0' ? 9 : Number(digit) - 1;
 };
 
-const SCREEN_CONTEXT_KEYWORDS = /화면|스크린|보이는|visible|ui|layout|버튼|입력창|chat|대화|terminal|터미널|prompt|프롬프트|nano|pico|vim|editor|편집기|pane|패널/i;
-
 const clampText = (value: string, maxLength: number): string => {
     const normalized = value.trim();
     if (normalized.length <= maxLength) return normalized;
     return `${normalized.slice(0, maxLength).trimEnd()}...`;
-};
-
-const clampTextFromEnd = (value: string, maxLength: number): string => {
-    const normalized = value.trim();
-    if (normalized.length <= maxLength) return normalized;
-    return `...${normalized.slice(normalized.length - maxLength).trimStart()}`;
-};
-
-const extractTagContents = (value: string, tagName: string): string[] => {
-    const regex = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'gi');
-    const matches: string[] = [];
-    let match: RegExpExecArray | null = null;
-
-    while ((match = regex.exec(value)) !== null) {
-        const content = stripMarkupForContext(match[1] || '');
-        if (content) {
-            matches.push(content);
-        }
-    }
-
-    return matches;
-};
-
-const dedupePreserveOrder = (values: string[]): string[] => {
-    const seen = new Set<string>();
-    const deduped: string[] = [];
-
-    for (const value of values) {
-        const normalized = value.trim();
-        if (!normalized || seen.has(normalized)) continue;
-        seen.add(normalized);
-        deduped.push(normalized);
-    }
-
-    return deduped;
-};
-
-const getMeaningfulUserHistory = (history: Message[]): Message[] => (
-    history.filter(message => message.role === 'user' && message.content.trim() && !isSyntheticToolResponseContent(message.content))
-);
-
-const inferTaskStage = (history: Message[]): TaskMemory['stage'] => {
-    for (let index = history.length - 1; index >= 0; index -= 1) {
-        const message = history[index];
-        const content = message.content.trim();
-        if (!content) continue;
-
-        if (message.role === 'tool') return 'inspect';
-        if (message.role === 'user') return 'plan';
-        if (message.role === 'assistant') {
-            return parseToolCallFromResponse(content) ? 'execute' : 'finalize';
-        }
-    }
-
-    return 'plan';
-};
-
-const summarizeToolContentForMemory = (message: Message): string => {
-    const normalized = stripMarkupForContext(message.content);
-    if (!normalized) {
-        return message.name ? `${message.name}: (empty result)` : '(empty result)';
-    }
-
-    const commandMatch = normalized.match(/Command:\s*`?([^`\n]+)`?/i);
-    const statusMatch = normalized.match(/Status:\s*([\s\S]*)$/i);
-    const commandText = commandMatch?.[1]?.trim();
-    const statusText = statusMatch ? clampText(stripMarkupForContext(statusMatch[1]), 120) : clampText(normalized, 120);
-    const toolName = message.name || 'tool';
-
-    if (commandText) {
-        if (statusText === `Sent to terminal: ${commandText}`) {
-            return `${toolName}: ${commandText}`;
-        }
-        return `${toolName}: ${commandText} -> ${statusText}`;
-    }
-
-    return `${toolName}: ${statusText}`;
-};
-
-const summarizeMessageForMemory = (message: Message): string => {
-    if (message.role === 'tool') {
-        return summarizeToolContentForMemory(message);
-    }
-
-    const normalized = stripToolCallMarkup(stripMarkupForContext(message.content));
-    if (!normalized) return '';
-
-    if (message.role === 'assistant') {
-        return clampText(normalized, 220);
-    }
-
-    if (message.role === 'system') {
-        return clampText(normalized, 180);
-    }
-
-    return clampText(normalized, 200);
-};
-
-const collectPlanItems = (history: Message[]): string[] => {
-    const collected: string[] = [];
-
-    for (const message of history) {
-        if (message.role !== 'assistant') continue;
-
-        const sections = [
-            ...extractTagContents(message.content, 'tasklist'),
-            ...extractTagContents(message.content, 'execution_plan'),
-            ...extractTagContents(message.content, 'progress'),
-        ];
-
-        for (const section of sections) {
-            const items = extractStructuredListItems(section);
-            for (const item of items) {
-                const text = clampText(stripMarkupForContext(item.text), 140);
-                if (!text || collected.includes(text)) continue;
-                collected.push(text);
-                if (collected.length >= TASK_MEMORY_PLAN_LIMIT) {
-                    return collected;
-                }
-            }
-        }
-    }
-
-    return collected;
-};
-
-const buildTaskMemory = (history: Message[]): TaskMemory => {
-    const meaningfulUsers = getMeaningfulUserHistory(history);
-    const recentRequests = meaningfulUsers
-        .slice(-TASK_MEMORY_REQUEST_LIMIT)
-        .map(message => clampText(stripMarkupForContext(message.content), 180));
-    const request = recentRequests[recentRequests.length - 1] || '';
-
-    const planItems = collectPlanItems(history);
-    const stepResults = dedupePreserveOrder(history
-        .filter(message => message.role === 'tool' || (message.role === 'assistant' && !parseToolCallFromResponse(message.content) && message.content.trim()))
-        .map(summarizeMessageForMemory)
-        .filter(Boolean)
-    ).slice(-TASK_MEMORY_STEP_LIMIT);
-
-    const latestEvidence = dedupePreserveOrder(history
-        .filter(message => {
-            if (message.role === 'tool') return true;
-            if (message.role === 'user' && /\[Latest user request\]/.test(message.content)) return true;
-            return false;
-        })
-        .map(summarizeMessageForMemory)
-        .filter(Boolean)
-    ).slice(-TASK_MEMORY_EVIDENCE_LIMIT);
-
-    const latestAssistant = [...history]
-        .reverse()
-        .find(message => message.role === 'assistant' && !parseToolCallFromResponse(message.content) && stripToolCallMarkup(message.content).trim());
-    const draftResponse = latestAssistant ? clampText(stripToolCallMarkup(stripMarkupForContext(latestAssistant.content)), 180) : '';
-    const finalDraftResponse = stepResults.includes(draftResponse) ? '' : draftResponse;
-
-    return {
-        request,
-        stage: inferTaskStage(history),
-        recentRequests,
-        planItems,
-        stepResults,
-        latestEvidence,
-        draftResponse: finalDraftResponse,
-    };
-};
-
-const renderTaskMemory = (memory: TaskMemory): string => {
-    const sections: string[] = [
-        `CURRENT_REQUEST: ${memory.request || '(none)'}`,
-        `CURRENT_STAGE: ${memory.stage}`,
-    ];
-
-    if (memory.recentRequests.length > 0) {
-        sections.push(`RECENT_REQUESTS:\n${memory.recentRequests.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    }
-
-    if (memory.planItems.length > 0) {
-        sections.push(`WORKING_PLAN:\n${memory.planItems.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    }
-
-    if (memory.stepResults.length > 0) {
-        sections.push(`STEP_RESULTS:\n${memory.stepResults.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    }
-
-    if (memory.latestEvidence.length > 0) {
-        sections.push(`LATEST_EVIDENCE:\n${memory.latestEvidence.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    }
-
-    if (memory.draftResponse) {
-        sections.push(`DRAFT_RESPONSE:\n${memory.draftResponse}`);
-    }
-
-    sections.push('Use TASK_MEMORY as the main prior-state summary. Verify with tools for system facts or fresh output.');
-
-    return sections.join('\n\n');
-};
-
-const buildCompactHistory = (history: Message[]): Message[] => {
-    return history
-        .filter((message, index) => {
-            if (index === 0 && message.role === 'assistant') return false;
-            if (message.role === 'system' && /^🔧 Executing /.test(message.content.trim())) return false;
-            if (message.role === 'assistant' && !stripToolCallMarkup(stripMarkupForContext(message.content)).trim()) return false;
-            return Boolean(message.content.trim());
-        })
-        .slice(-TASK_MEMORY_RECENT_MESSAGE_LIMIT)
-        .map((message) => {
-            const maxLength = message.role === 'tool' ? 220 : message.role === 'assistant' ? 240 : 180;
-            return {
-                ...message,
-                content: clampTextFromEnd(message.content, maxLength),
-            };
-        });
-};
-
-const shouldAttachScreenContext = (history: Message[]): boolean => {
-    const latestUser = [...history]
-        .reverse()
-        .find(message => message.role === 'user' && message.content.trim() && !isSyntheticToolResponseContent(message.content));
-    const latestRequest = latestUser?.content || '';
-    if (SCREEN_CONTEXT_KEYWORDS.test(latestRequest)) return true;
-
-    const latestAssistant = [...history].reverse().find(message => message.role === 'assistant' && message.content.trim());
-    if (latestAssistant && parseToolCallFromResponse(latestAssistant.content)?.toolName === 'send_keys') {
-        return true;
-    }
-
-    return false;
-};
-
-const buildCompactVisibleChat = (history: Message[]): string => {
-    return history
-        .filter(message => !isSyntheticToolResponseContent(message.content))
-        .slice(-2)
-        .map(message => {
-            const roleLabel = message.role === 'user' ? 'U' : message.role === 'assistant' ? 'A' : message.role === 'tool' ? 'T' : 'S';
-            return `${roleLabel}: ${clampText(stripMarkupForContext(message.content) || '(empty)', 120)}`;
-        })
-        .join('\n');
-};
-
-const shouldUseComplexTaskMode = (request: string): boolean => {
-    const normalized = request.trim();
-    if (!normalized) return false;
-
-    const sentenceCount = normalized.split(/[.!?\n]/).map(token => token.trim()).filter(Boolean).length;
-    const lineCount = normalized.split('\n').map(token => token.trim()).filter(Boolean).length;
-    const hasCodeLikeContent = /```|`[^`]+`|[{}[\]();]/.test(normalized);
-    const hasPathOrCommandLikeContent = /(^|\s)(\/|~|[A-Za-z]:\\)|\b[a-z0-9_-]+\.[a-z0-9]{1,8}\b/i.test(normalized);
-
-    return normalized.length >= 220
-        || sentenceCount >= 4
-        || lineCount >= 5
-        || (sentenceCount >= 2 && hasCodeLikeContent)
-        || (sentenceCount >= 2 && hasPathOrCommandLikeContent);
 };
 
 const shouldContinueAfterActionlessAnalysis = (response: string, userRequest: string): boolean => {
@@ -1611,33 +1347,6 @@ const detectWindowsPowerShellSyntaxIssue = (command: string): string | null => {
     return match ? match.message : null;
 };
 
-const buildTaskWorkflowPrompt = (complexRequest: boolean): string => {
-    if (!complexRequest) return '';
-
-    return `
-5. COMPLEX TASK MODE: The app already suspects this request may be complex, but you must still decide this yourself from the user's meaning, not from keywords or UI language. Before responding, quickly classify the request as either:
-   - QUICK RESPONSE: a simple answer, brief explanation, or single obvious action that does not need planning
-   - PLANNED TASK: work that needs multiple steps, implementation, investigation, refactoring, review, or coordination
-   Only use task-oriented structure when it is truly a PLANNED TASK.
-6. COMPLEX TASK FORMAT: For a PLANNED TASK, the first substantial assistant response may include these blocks in order when they add value:
-   <analysis>Short diagnosis of the request and constraints</analysis>
-   <tasklist title="Execution Plan" description="What will be handled end-to-end">
-   1. Define or confirm the task breakdown
-   2. Execute the tasks in order
-   3. Verify outcomes
-   </tasklist>
-   After meaningful work is completed, include:
-   <walkthrough title="What I Did" description="Concrete execution trace">
-   1. ...
-   2. ...
-   </walkthrough>
-   <report title="Completion Report" description="Outcome, verification, and remaining risk">
-   1. ...
-   2. ...
-   </report>
-7. COMPLEX TASK BEHAVIOR: If it is a QUICK RESPONSE, answer directly and do not create a task list, execution plan, or runbook framing. If it is a PLANNED TASK, do not only propose a plan. Actually carry out the work, keep the task list aligned with the work performed, and finish with a completion report.`;
-};
-
 const FOLLOW_UP_LLM_TIMEOUT_MS = 20000;
 
 const normalizeEscapedXmlToolTags = (value: string): string => (
@@ -1650,30 +1359,6 @@ const stripToolCallMarkup = (value: string): string => (
         .replace(/<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim()
-);
-
-const renderAvailableToolsForPrompt = (tools: Array<{ name: string; description?: string; inputSchema?: any }>): string => {
-    if (!tools.length) {
-        return 'AVAILABLE_TOOLS:\n- (none)';
-    }
-
-    const lines = tools.map((tool) => {
-        const propertyNames = Object.keys(tool.inputSchema?.properties || {});
-        const required = Array.isArray(tool.inputSchema?.required) ? tool.inputSchema.required : [];
-        const argsText = propertyNames.length
-            ? ` args: ${propertyNames.map((name) => `${name}${required.includes(name) ? '*' : ''}`).join(', ')}`
-            : ' args: none';
-        return `- ${tool.name}: ${(tool.description || '').trim()}${argsText}`;
-    });
-
-    lines.push('- Prefer search_web for current/latest internet information when it is available.');
-    lines.push('- Use read_web_page only for a specific URL or when the user explicitly asks to inspect a page.');
-
-    return `AVAILABLE_TOOLS:\n${lines.join('\n')}`;
-};
-
-const getPromptVisibleTools = (tools: Array<{ name: string; description?: string; inputSchema?: any }>, enabledTools: string[]) => (
-    tools.filter(tool => enabledTools.includes(tool.name) && !INTERNAL_ONLY_TOOL_NAMES.has(tool.name))
 );
 
 const needsContinuationAfterPlan = (response: string): boolean => {
@@ -1939,15 +1624,15 @@ function App() {
     }, [mcpPort]);
 
     useEffect(() => {
-        UpdateMCPSettings(mcpPort, mcpLabel, debugPanelEnabled).catch((error) => {
+        UpdateMCPSettings(mcpPort, mcpLabel, debugPanelEnabled).catch((error: unknown) => {
             console.error('[MCP] Failed to apply persisted MCP settings on startup:', error);
         });
     }, []);
 
     useEffect(() => {
         GetRuntimePlatform()
-            .then((platform) => setRuntimePlatform(platform || 'unknown'))
-            .catch((error) => {
+            .then((platform: string) => setRuntimePlatform(platform || 'unknown'))
+            .catch((error: unknown) => {
                 console.error('Failed to get runtime platform:', error);
             });
     }, []);
@@ -2605,22 +2290,37 @@ ${t('greeting')}`
     };
 
     const shouldIncludeScreenContext = (history: Message[]): boolean => {
-        return history.length > 0 && shouldAttachScreenContext(history);
+        return history.length > 0 && shouldAttachScreenContext(history, {
+            isSyntheticToolResponseContent,
+            parseToolCallFromResponse,
+        });
     };
 
     const buildScreenContext = (history: Message[]): string => {
         const activeTab = tabs.find(tab => tab.id === activeTabId);
-        const visibleChat = buildCompactVisibleChat(history);
+        const visibleChat = buildCompactVisibleChat(history, {
+            isSyntheticToolResponseContent,
+            stripMarkupForContext,
+        });
 
         return [
             `TAB: ${activeTab?.name || activeTabId}`,
             `CURRENT_WORKING_DIRECTORY: ${getKnownTerminalCwd(activeTabId) || '(unknown)'}`,
             `WIDTH: ${chatWidth}px`,
             'TERMINAL:',
-            clampTextFromEnd(getRecentTerminalContextBuffer(activeTabId), 700),
+            clampPromptTextFromEnd(getRecentTerminalContextBuffer(activeTabId), 700),
             'CHAT:',
             visibleChat || t('chatEmpty'),
         ].join('\n');
+    };
+
+    const promptHarnessDeps = {
+        stripMarkupForContext,
+        stripToolCallMarkup,
+        parseToolCallFromResponse,
+        extractStructuredListItems,
+        isSyntheticToolResponseContent,
+        buildScreenContext,
     };
 
     const parseSafetyPatterns = (value: string): string[] => (
@@ -2687,26 +2387,6 @@ ${t('greeting')}`
         }
 
         return { status: 'allow' };
-    };
-
-    const buildLLMMessages = (
-        history: Message[],
-        baseSystemPrompt: string,
-        options?: { includeScreenContext?: boolean }
-    ) => {
-        const includeScreenContext = options?.includeScreenContext ?? false;
-        const taskMemory = buildTaskMemory(history);
-        const compactHistory = buildCompactHistory(history);
-        const systemSections = [baseSystemPrompt, `TASK_MEMORY:\n${renderTaskMemory(taskMemory)}`];
-
-        if (includeScreenContext) {
-            systemSections.push(`SCREEN_CONTEXT:\n${buildScreenContext(history)}`);
-        }
-
-        return [{
-            role: 'system',
-            content: systemSections.join('\n\n'),
-        }, ...compactHistory];
     };
 
     const summarizeToolResultForHistory = (toolName: string, result: string): string => {
@@ -2869,7 +2549,12 @@ ${t('greeting')}`
             nextResponse = stripToolCallMarkup(responseSansCommand);
         }
 
-        const llmMessages = buildLLMMessages(historyToSend, baseSystemPrompt, { includeScreenContext: false });
+        const llmMessages = buildLLMMessages({
+            history: historyToSend,
+            baseSystemPrompt,
+            includeScreenContext: false,
+            deps: promptHarnessDeps,
+        });
         const adaptive = getAdaptiveBaseToolTemperature(historyToSend, toolName, toolArgs, toolLoopCount);
         updateDebugTrace({
             requestMeta: maskSensitiveText([
@@ -3170,7 +2855,12 @@ ${t('greeting')}`
         ];
 
         await syncRecentTerminalContextBuffer(activeTabId);
-        const llmMessages = buildLLMMessages(terminalContext, analysisPrompt, { includeScreenContext: true });
+        const llmMessages = buildLLMMessages({
+            history: terminalContext,
+            baseSystemPrompt: analysisPrompt,
+            includeScreenContext: true,
+            deps: promptHarnessDeps,
+        });
         updateDebugTrace({
             requestMeta: maskSensitiveText([
                 `Provider: ${provider}`,
@@ -3511,40 +3201,19 @@ ${t('greeting')}`
         });
 
         try {
-            const activeTools = getPromptVisibleTools(availableTools, enabledTools);
+            const activeTools = getPromptVisibleTools(availableTools, enabledTools, INTERNAL_ONLY_TOOL_NAMES);
             console.log(`[LLM] Initiating request to ${apiUrl} with ${activeTools.length} prompt-visible tools enabled.`);
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
             const complexRequest = shouldUseComplexTaskMode(trimmedInput);
-            const availableToolsSection = renderAvailableToolsForPrompt(activeTools);
             const currentWorkingDirectory = getKnownTerminalCwd(activeTabId) || '(unknown)';
-            const trimmedGlobalUserPrompt = globalUserPrompt.trim();
-            const globalUserPromptSection = trimmedGlobalUserPrompt
-                ? `
-
-5. GLOBAL USER PROMPT:
-Treat this as persistent user preference/context unless it conflicts with safety, exact tool syntax, or the current request.
-[BEGIN_GLOBAL_USER_PROMPT]
-${trimmedGlobalUserPrompt}
-[END_GLOBAL_USER_PROMPT]`
-                : '';
-
-            const baseSystemPrompt = `You are ${mcpLabel}, a professional AI engineer. 
-1. Keep answers compact for a narrow side chat. First decide whether the user's request needs a quick direct response or a planned multi-step task. Use <analysis>, <progress>, and <artifact> only when helpful.
-2. SCREEN_CONTEXT is only for visible UI/terminal/chat state. Do not use it as proof for files, paths, counts, command output, or other verifiable system facts when tools can check them.
-3. Tool syntax is strict. Use exactly one structured format for all tool calls:
-   - Terminal command: <execute_command>{"command":"YOUR_COMMAND"}</execute_command>
-   - Terminal keys: <send_keys>{"keys":["ESC",":q!","ENTER"]}</send_keys>
-   - Other tools: <tool_name>{"arg":"value"}</tool_name>
-   Use only listed tools. Never invent file-edit tools. Do not use legacy wrappers like >>> ... <<< or [TOOL: ...].
-4. Use tools for terminal actions, system checks, files/paths, command results, latest web info, or page verification.
-5. Judge requests by meaning, not keywords, across all user languages. Do not create a task list or plan unless the request genuinely needs one.
-6. If terminal control is stuck in an interactive program, recover with CTRL_C on macOS. If OS is Windows, use PowerShell syntax only.
-7. When the user asks for current events, recent facts, or web verification, prefer search_web instead of answering from memory when that tool is available.${buildTaskWorkflowPrompt(complexRequest)}
-Current OS: ${window.navigator.platform}
-Current Working Directory: ${currentWorkingDirectory}
-Complex Request Mode: ${complexRequest ? 'enabled' : 'disabled'}
-
-${availableToolsSection}${globalUserPromptSection}`;
+            const baseSystemPrompt = buildBaseSystemPrompt({
+                mcpLabel,
+                currentOS: window.navigator.platform,
+                currentWorkingDirectory,
+                complexRequest,
+                availableTools: activeTools,
+                globalUserPrompt,
+            });
 
             const historyToSend = newMessages.filter((msg, idx) => {
                 if (idx === 0 && msg.role === 'assistant') return false;
@@ -3554,8 +3223,11 @@ ${availableToolsSection}${globalUserPromptSection}`;
 
             await syncRecentTerminalContextBuffer(activeTabId);
             const initialScreenContext = shouldIncludeScreenContext(loopHistory) ? buildScreenContext(loopHistory) : '(screen context disabled)';
-            let currentMessages: any[] = buildLLMMessages(loopHistory, baseSystemPrompt, {
+            let currentMessages: any[] = buildLLMMessages({
+                history: loopHistory,
+                baseSystemPrompt,
                 includeScreenContext: shouldIncludeScreenContext(loopHistory),
+                deps: promptHarnessDeps,
             });
             updateDebugTrace({
                 screenContext: maskSensitiveText(initialScreenContext, apiKey),
@@ -3644,8 +3316,11 @@ ${availableToolsSection}${globalUserPromptSection}`;
                         `Temperature: ${temperature}`,
                         `Context Source: continuation (attempt ${continuationAttempt + 1})`,
                     ].join('\n'), apiKey),
-                    requestMessages: maskSensitiveText(safeJsonStringify(buildLLMMessages(continuationHistory, baseSystemPrompt, {
+                    requestMessages: maskSensitiveText(safeJsonStringify(buildLLMMessages({
+                        history: continuationHistory,
+                        baseSystemPrompt,
                         includeScreenContext: shouldIncludeScreenContext(continuationHistory),
+                        deps: promptHarnessDeps,
                     })), apiKey),
                 });
                 response = await FetchLLMResponse(
@@ -3656,8 +3331,11 @@ ${availableToolsSection}${globalUserPromptSection}`;
                     temperature,
                     provider,
                     true,
-                    buildLLMMessages(continuationHistory, baseSystemPrompt, {
+                    buildLLMMessages({
+                        history: continuationHistory,
+                        baseSystemPrompt,
                         includeScreenContext: shouldIncludeScreenContext(continuationHistory),
+                        deps: promptHarnessDeps,
                     }),
                 );
                 updateDebugTrace({
@@ -3905,8 +3583,11 @@ ${availableToolsSection}${globalUserPromptSection}`;
                             Math.min(0.6, toolTemperature + (toolLoopCount >= 6 ? 0.12 : 0)),
                             provider,
                             true,
-                            buildLLMMessages(contHistory, baseSystemPrompt, {
+                            buildLLMMessages({
+                                history: contHistory,
+                                baseSystemPrompt,
                                 includeScreenContext: false,
+                                deps: promptHarnessDeps,
                             }),
                         );
                         updateDebugTrace({
@@ -4027,7 +3708,7 @@ ${availableToolsSection}${globalUserPromptSection}`;
         const nextMessages: Message[] = [{
             role: 'assistant',
             content: `<analysis>System Lifecycle: Reset Success</analysis>
-<progress title="DKST Terminal Assistant: New Session" description="System is ready for your next request.">
+<progress title="DKST Terminal AI: New Session" description="System is ready for your next request.">
 1. Conversation history cleared
 2. Memory buffer released
 </progress>
@@ -4038,7 +3719,7 @@ ${t('chatCleared')}`
     };
 
     useEffect(() => {
-        console.log("DKST Terminal Assistant: Component Mounted");
+        console.log("DKST Terminal AI: Component Mounted");
     }, []);
 
     return (
