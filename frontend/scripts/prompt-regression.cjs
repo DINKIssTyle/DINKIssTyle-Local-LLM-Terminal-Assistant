@@ -196,6 +196,104 @@ const cases = [
         actual: () => harness.shouldSuppressDuplicateAppToolCall('execute_command', 1),
         expected: false,
     },
+    {
+        name: 'recognizes a completed answer before a trailing verification command',
+        actual: () => harness.hasSubstantiveAnswerBeforeToolCall(
+            '운영체제 버전은 Microsoft Windows 11 Pro (버전 10.0.26200)입니다.\n<execute_command>{"command":"Get-CimInstance Win32_OperatingSystem"}</execute_command>',
+            '<execute_command>{"command":"Get-CimInstance Win32_OperatingSystem"}</execute_command>',
+        ),
+        expected: true,
+    },
+    {
+        name: 'does not mistake command narration for a completed answer',
+        actual: () => harness.hasSubstantiveAnswerBeforeToolCall(
+            '정확한 버전을 다시 확인하겠습니다.\n<execute_command>{"command":"Get-CimInstance Win32_OperatingSystem"}</execute_command>',
+            '<execute_command>{"command":"Get-CimInstance Win32_OperatingSystem"}</execute_command>',
+        ),
+        expected: false,
+    },
+    {
+        name: 'canonicalizes visually identical terminal commands',
+        actual: () => harness.canonicalizeTerminalCommand('  Get-CimInstance   Win32_Processor |\r\n Select-Object Name;  '),
+        expected: 'get-ciminstance win32_processor | select-object name',
+    },
+    {
+        name: 'recognizes an explicit request not to repeat a command',
+        actual: () => harness.userForbidsCommandRepeat('실패한 명령을 반복하지 말고 다른 안전한 명령을 사용하세요'),
+        expected: true,
+    },
+    {
+        name: 'does not block a normal request merely containing 다시',
+        actual: () => harness.userForbidsCommandRepeat('CPU 정보를 다시 알려주세요'),
+        expected: false,
+    },
+    {
+        name: 'parses a missing-pipe local-model tool token',
+        actual: () => harness.parseTokenStyleToolEnvelope(
+            '<|tool_call>execute_command{"command":"wmic path win32_videocontroller get caption, adapterram"}',
+        ),
+        expected: {
+            raw: '<|tool_call>execute_command{"command":"wmic path win32_videocontroller get caption, adapterram"}',
+            toolName: 'execute_command',
+            payloadText: '{"command":"wmic path win32_videocontroller get caption, adapterram"}',
+        },
+    },
+    {
+        name: 'keeps PowerShell braces inside token-style JSON strings',
+        actual: () => harness.parseTokenStyleToolEnvelope(
+            '<|tool_call|>execute_command{"command":"Get-CimInstance X | Select @{N=\'A\';E={$_.B}}"}<|/tool_call|>',
+        )?.payloadText,
+        expected: '{"command":"Get-CimInstance X | Select @{N=\'A\';E={$_.B}}"}',
+    },
+    {
+        name: 'recognizes a PowerShell prompt after a legacy CWD marker',
+        actual: () => harness.looksLikeRecoveredShellPromptLine(
+            '2026-06-10 오후 10:36:09\\u0007e]633;cwd=C:\\WorkPS C:\\Work>',
+        ),
+        expected: true,
+    },
+    {
+        name: 'rejects per-module memory rows as a total-memory check',
+        actual: () => harness.getMissingRequiredTerminalActions(
+            '설치된 총 메모리 용량을 알려주세요',
+            ['Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity, @{N="TotalGB";E={$_.Capacity / 1GB}}'],
+        ),
+        expected: ['total installed memory aggregation (use Win32_ComputerSystem.TotalPhysicalMemory or Measure-Object Capacity -Sum)'],
+    },
+    {
+        name: 'accepts an explicitly summed physical-memory query',
+        actual: () => harness.getMissingRequiredTerminalActions(
+            'total installed memory',
+            ['(Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1GB'],
+        ),
+        expected: [],
+    },
+    {
+        name: 'accepts Win32 ComputerSystem total physical memory',
+        actual: () => harness.getMissingRequiredTerminalActions(
+            'installed RAM',
+            ['Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory'],
+        ),
+        expected: [],
+    },
+    {
+        name: 'corrects a per-module command for a total-memory request',
+        actual: () => harness.correctTotalInstalledMemoryCommand(
+            '설치된 총 메모리 용량을 알려주세요',
+            'Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity',
+            true,
+        ),
+        expected: "Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object @{Name='TotalMemoryGB';Expression={[math]::Round([double]$_.TotalPhysicalMemory / 1GB, 2)}} | ConvertTo-Json -Compress",
+    },
+    {
+        name: 'preserves a memory-module detail query',
+        actual: () => harness.correctTotalInstalledMemoryCommand(
+            '설치된 메모리 모듈과 제조사를 알려주세요',
+            'Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity, Manufacturer',
+            true,
+        ),
+        expected: 'Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity, Manufacturer',
+    },
 ];
 
 let passed = 0;

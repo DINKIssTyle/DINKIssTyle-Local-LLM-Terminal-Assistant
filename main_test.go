@@ -25,7 +25,8 @@ func TestEmbeddedSkillsAreAvailableToApp(t *testing.T) {
 	if !strings.Contains(context, "ACTIVE SKILL: "+expectedSkill) {
 		t.Fatalf("embedded operating-system skill was not selected: %q", context)
 	}
-	if !strings.Contains(context, "## Command set") {
+	if !strings.Contains(context, "## Non-negotiable execution contract") ||
+		!strings.Contains(context, "Never prefix a command with `powershell`") {
 		t.Fatalf("embedded skill content was not loaded: %q", context)
 	}
 }

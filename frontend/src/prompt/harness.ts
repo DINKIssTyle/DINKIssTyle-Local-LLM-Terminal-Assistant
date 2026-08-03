@@ -130,6 +130,109 @@ export const shouldSuppressDuplicateAppToolCall = (toolName: string, previousExe
     && toolName !== 'send_keys'
 );
 
+/** Detect a real answer that precedes an unnecessary trailing tool call. */
+export const hasSubstantiveAnswerBeforeToolCall = (response: string, rawToolCall: string): boolean => {
+    const toolIndex = rawToolCall ? response.indexOf(rawToolCall) : -1;
+    if (toolIndex <= 0) return false;
+
+    const visiblePrefix = response
+        .slice(0, toolIndex)
+        .replace(/<(?:analysis|progress|tasklist|execution_plan)\b[^>]*>[\s\S]*?<\/(?:analysis|progress|tasklist|execution_plan)>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/[*_`#>|-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    if (visiblePrefix.length < 12 || !/[\p{L}\p{N}]/u.test(visiblePrefix)) return false;
+
+    const onlyAnnouncesMoreWork = /(?:\b(?:i(?:'ll|\s+will)|let\s+me|need\s+to|going\s+to)\b.{0,80}\b(?:run|check|verify|inspect|try)\b|(?:확인|실행|조회|검증|점검|알아보|시도).{0,40}(?:겠습니다|볼게요|합니다)|다시.{0,24}(?:명령|실행|확인))/i.test(visiblePrefix);
+    return !onlyAnnouncesMoreWork;
+};
+
+export const canonicalizeTerminalCommand = (command: string): string => (
+    command
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/;+$/, '')
+        .trim()
+        .toLowerCase()
+);
+
+export const userForbidsCommandRepeat = (request: string): boolean => (
+    /(?:반복|재실행|다시\s*(?:실행|명령|조회|확인)).{0,24}(?:말|마|않|금지|대신)|(?:말|마|않|금지).{0,24}(?:반복|재실행|다시)|(?:do\s+not|don['’]?t|without)\s+(?:repeat|rerun|run(?:ning)?\s+(?:it|that)\s+again)|instead\s+of\s+(?:repeating|rerunning)/i.test(request)
+);
+
+export type TokenStyleToolEnvelope = {
+    raw: string;
+    toolName: string;
+    payloadText: string;
+};
+
+/** Parse both `<|tool_call|>` and the common local-model typo `<|tool_call>`. */
+export const parseTokenStyleToolEnvelope = (response: string): TokenStyleToolEnvelope | null => {
+    const opener = /<\|tool_call(?:\|)?>\s*([a-zA-Z0-9_:-]+)\s*/i.exec(response);
+    if (!opener) return null;
+
+    const payloadStart = response.indexOf('{', opener.index + opener[0].length);
+    if (payloadStart < 0) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let payloadEnd = -1;
+    for (let index = payloadStart; index < response.length; index += 1) {
+        const char = response[index];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (char === '\\') escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') inString = true;
+        else if (char === '{') depth += 1;
+        else if (char === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                payloadEnd = index + 1;
+                break;
+            }
+        }
+    }
+    if (payloadEnd < 0) return null;
+
+    const suffix = response.slice(payloadEnd).match(/^\s*(?:<\|\/?tool_call(?:\|)?>|<\/?tool_call>)?/i)?.[0] || '';
+    return {
+        raw: response.slice(opener.index, payloadEnd + suffix.length),
+        toolName: opener[1].toLowerCase(),
+        payloadText: response.slice(payloadStart, payloadEnd),
+    };
+};
+
+export const stripTokenStyleToolCalls = (response: string): string => {
+    let stripped = response;
+    for (let count = 0; count < 8; count += 1) {
+        const envelope = parseTokenStyleToolEnvelope(stripped);
+        if (!envelope) break;
+        stripped = stripped.replace(envelope.raw, '');
+    }
+    return stripped.replace(/<\|\/?tool_call(?:\|)?>|<\/?tool_call>/gi, '');
+};
+
+export const looksLikeRecoveredShellPromptLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/HEREDOC>\s*$/i.test(trimmed)) return false;
+    if (/UW PICO|GNU NANO|\^X EXIT|\(END\)|MANUAL PAGE/i.test(trimmed)) return false;
+
+    return /[%#$]\s*$/.test(trimmed)
+        || /^[^ \n]+@[^ \n]+.*[%#$]\s*$/.test(trimmed)
+        || /(?:^|\/)[^/\n]+\s[%#$]\s*$/.test(trimmed)
+        || /(?:^|[\x07]|e\]633;cwd=.*)PS [^\r\n>]+>\s*$/i.test(trimmed)
+        || /(?:^|[\x07]|e\]633;cwd=.*)[A-Za-z]:\\.*>\s*$/.test(trimmed);
+};
+
 type TaskMemory = {
     request: string;
     stage: 'plan' | 'execute' | 'inspect' | 'finalize';
@@ -612,6 +715,26 @@ export const shouldRejectUnexpectedDirectoryChange = (userRequest: string, comma
     && !DIRECTORY_CHANGE_REQUEST_PATTERN.test(userRequest)
 );
 
+const TOTAL_INSTALLED_MEMORY_REQUEST_PATTERN = /(?:총|전체|설치(?:된|량)?|물리)\s*(?:시스템\s*)?(?:메모리|램)|(?:메모리|램)\s*(?:총|전체|설치(?:된|량)?|용량)|total\s+(?:installed\s+|physical\s+)?(?:memory|ram)|installed\s+(?:memory|ram)/i;
+const MEMORY_MODULE_DETAIL_REQUEST_PATTERN = /(?:메모리|램).{0,16}(?:모듈|슬롯|제조사|개수|목록)|(?:module|slot|manufacturer|part\s*number).{0,16}(?:memory|ram)|(?:memory|ram).{0,16}(?:module|slot|manufacturer|part\s*number)/i;
+const AGGREGATED_MEMORY_COMMAND_PATTERN = /win32_computersystem[^\n]*(?:totalphysicalmemory)|(?:win32_physicalmemory|\.capacity)[^\n]*(?:measure-object[^\n]*-sum|-sum[^\n]*measure-object)/i;
+
+export const correctTotalInstalledMemoryCommand = (
+    userRequest: string,
+    proposedCommand: string,
+    isWindows: boolean,
+): string => {
+    if (!isWindows
+        || !TOTAL_INSTALLED_MEMORY_REQUEST_PATTERN.test(userRequest)
+        || MEMORY_MODULE_DETAIL_REQUEST_PATTERN.test(userRequest)
+        || AGGREGATED_MEMORY_COMMAND_PATTERN.test(proposedCommand)
+        || !/(?:memory|ram|win32_physicalmemory|totalphysicalmemory)/i.test(proposedCommand)) {
+        return proposedCommand;
+    }
+
+    return "Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object @{Name='TotalMemoryGB';Expression={[math]::Round([double]$_.TotalPhysicalMemory / 1GB, 2)}} | ConvertTo-Json -Compress";
+};
+
 export const getMissingRequiredTerminalActions = (userRequest: string, commands: string[]): string[] => {
     const request = userRequest.trim();
     if (!request) return [];
@@ -637,6 +760,11 @@ export const getMissingRequiredTerminalActions = (userRequest: string, commands:
     if (DIRECTORY_CHANGE_REQUEST_PATTERN.test(request)
         && !/(?:^|[;&|]\s*)cd(?:\s|$)/im.test(executed)) {
         missing.push('requested directory change');
+    }
+    const requestsTotalInstalledMemory = TOTAL_INSTALLED_MEMORY_REQUEST_PATTERN.test(request) && !MEMORY_MODULE_DETAIL_REQUEST_PATTERN.test(request);
+    const hasAggregatedMemoryCommand = AGGREGATED_MEMORY_COMMAND_PATTERN.test(executed);
+    if (requestsTotalInstalledMemory && !hasAggregatedMemoryCommand) {
+        missing.push('total installed memory aggregation (use Win32_ComputerSystem.TotalPhysicalMemory or Measure-Object Capacity -Sum)');
     }
 
     return missing;

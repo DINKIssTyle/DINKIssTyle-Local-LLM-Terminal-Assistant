@@ -10,8 +10,8 @@ export function ClearTerminalContext(arg1) {
   return window['go']['app']['App']['ClearTerminalContext'](arg1);
 }
 
-export function FetchAvailableModels(arg1, arg2) {
-  return window['go']['app']['App']['FetchAvailableModels'](arg1, arg2);
+export function FetchAvailableModels(arg1, arg2, arg3) {
+  return window['go']['app']['App']['FetchAvailableModels'](arg1, arg2, arg3);
 }
 
 export function FetchLLMResponse(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
@@ -92,6 +92,10 @@ export function StopTerminal(arg1) {
 
 export function UninstallSystemIntegration() {
   return window['go']['app']['App']['UninstallSystemIntegration']();
+}
+
+export function UnloadModel(arg1, arg2, arg3, arg4) {
+  return window['go']['app']['App']['UnloadModel'](arg1, arg2, arg3, arg4);
 }
 
 export function UpdateToolRuntimeSettings(arg1) {

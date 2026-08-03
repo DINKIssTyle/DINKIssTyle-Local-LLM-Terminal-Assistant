@@ -1,73 +1,111 @@
 ---
 name: windows-powershell-commands
-description: Use native Windows PowerShell commands for terminal operations, system inspection, files, processes, services, networking, packages, and environment configuration. Apply when DKST Terminal AI runs on Windows and the user requests a local terminal or operating-system task.
+description: Execute reliable native PowerShell commands for Windows terminal work, including system and hardware inspection, files, processes, services, networking, packages, and environment configuration. Apply whenever DKST Terminal AI runs on Windows and needs to issue, repair, or interpret a local command, especially when quoting, pipelines, Select-Object, CIM/WMI output, prompt recovery, or repeated command attempts are involved.
 ---
 
 # Windows PowerShell Commands
 
-Use PowerShell syntax only. Prefer built-in cmdlets and return observable output after changes.
+The app terminal is already PowerShell. Send only a script body to `execute_command`.
 
-## Command set
+## Non-negotiable execution contract
 
-### Location and files
+1. Never prefix a command with `powershell`, `powershell.exe`, `pwsh`, or `-Command` when the active terminal is already PowerShell. A nested shell adds another quoting layer and commonly corrupts quotes, pipes, and closing braces.
+2. Put only the PowerShell script in the tool's `command` string. The JSON closing `}` and the tool-call closing tag are protocol syntax; never include either in the shell command.
+3. Execute one bounded read-only inspection. Combine related properties, but stop when the requested values are visible.
+4. When the requested values appear and the `PS ...>` prompt returns, treat the command as successful and answer. Do not run the same command again to reconfirm it.
+5. When a command fails, read the `CategoryInfo` and `FullyQualifiedErrorId`, change the faulty syntax, and retry once with a materially different command. Never repeat an identical failed command.
 
-```powershell
-Get-Location
-Get-ChildItem -Force
-Get-ChildItem -LiteralPath 'C:\path' -Force
-Get-Content -LiteralPath 'C:\path\file.txt' -Raw
-New-Item -ItemType Directory -Path 'C:\path\folder' -Force
-Copy-Item -LiteralPath 'C:\source' -Destination 'C:\target' -Recurse
-Move-Item -LiteralPath 'C:\source' -Destination 'C:\target'
-Remove-Item -LiteralPath 'C:\target' -Recurse -Force
-```
-
-Use `-LiteralPath` for user-provided paths. Inspect a target before deleting it.
-
-### System and storage
+Correct — send the script body directly:
 
 ```powershell
-Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsArchitecture
-Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
-Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory, LastBootUpTime
-Get-Volume | Select-Object DriveLetter, FileSystemLabel, Size, SizeRemaining
+Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object Caption, Version
 ```
 
-### Processes and services
+Incorrect — never send a nested shell wrapper or a protocol brace:
 
 ```powershell
-Get-Process | Sort-Object CPU -Descending | Select-Object -First 20
-Get-Service | Sort-Object Status, DisplayName
-Get-Service -Name 'service-name'
-Start-Service -Name 'service-name'
-Stop-Service -Name 'service-name'
+powershell -Command "Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version"}
 ```
 
-Confirm before stopping services or processes unless the user explicitly requested the exact target.
+## Syntax and quoting
 
-### Network
+- Separate `Select-Object` properties with commas: `Select-Object Caption, Version`. A space does not separate property arguments.
+- Use full cmdlet names in generated commands. Avoid aliases such as `select`, `where`, `sort`, `cat`, `dir`, or `del`.
+- Use single quotes for literal strings and paths. Escape an embedded single quote by doubling it.
+- Use double quotes only when PowerShell variable or subexpression expansion is required.
+- Do not use C/JSON-style `\"` escaping inside PowerShell. Let the tool-call JSON encode the command once.
+- Keep pipeline braces balanced. A calculated property has exactly one hashtable brace pair and one script-block brace pair:
 
 ```powershell
-Get-NetIPConfiguration
-Get-NetTCPConnection -State Listen
-Test-NetConnection -ComputerName 'example.com' -Port 443
-Resolve-DnsName 'example.com'
+@{Name='VRAM_MB'; Expression={[math]::Round([uint64]$_.AdapterRAM / 1MB)}}
 ```
 
-### Packages and environment
+- Prefer `-LiteralPath` for user-provided filesystem paths.
+
+## Produce observable, compact output
+
+PowerShell tables can wrap or truncate in a narrow terminal. For facts consumed by the assistant, prefer selected properties followed by compact JSON:
 
 ```powershell
-winget list
-winget search 'package-name'
-winget install --id 'Publisher.Package' --exact
-[Environment]::GetEnvironmentVariable('PATH', 'User')
-[Environment]::SetEnvironmentVariable('NAME', 'value', 'User')
+Get-CimInstance -ClassName Win32_OperatingSystem |
+    Select-Object Caption, Version, OSArchitecture, LastBootUpTime |
+    ConvertTo-Json -Compress
 ```
 
-## Execution rules
+Use a table only when every requested column fits. Do not use `Format-Table` before further processing; it emits display objects.
 
-- Do not emit Bash operators or Unix-only commands.
-- Quote paths with single quotes; escape an embedded single quote by doubling it.
-- Prefer one read-only command that gathers all requested fields.
-- After a mutation, run a separate read-only check that proves the result.
-- Treat registry edits, recursive deletion, service changes, and system-wide package changes as sensitive operations.
+For multiple rows, retain array shape when it matters:
+
+```powershell
+@(Get-CimInstance -ClassName Win32_VideoController |
+    Select-Object Name, AdapterCompatibility,
+        @{Name='VRAM_MB'; Expression={if ($null -ne $_.AdapterRAM) {[math]::Round([uint64]$_.AdapterRAM / 1MB)} else {$null}}}) |
+    ConvertTo-Json -Compress
+```
+
+Report `Microsoft Remote Display Adapter` alongside the physical GPU unless the user asks to exclude virtual adapters.
+
+## Interpret the terminal screen correctly
+
+- Treat text after the echoed command and before the next recovered `PS ...>` prompt as the current command's evidence.
+- A long prompt or echoed command may wrap across visual lines. Do not mistake wrapped command text for output or truncation.
+- A header, separator, and one or more data rows followed by a recovered prompt is a complete successful table.
+- Red `CategoryInfo`, `FullyQualifiedErrorId`, `ParserError`, `ParameterBindingException`, or `CommandNotFoundException` lines are failure evidence.
+- `>>` is the PowerShell continuation prompt and means a quote, parenthesis, brace, or pipeline is incomplete.
+- If output already contains every fact requested, answer from it. Do not inspect all object properties merely because more properties exist.
+
+## Reliable inspection recipes
+
+### Windows version
+
+```powershell
+Get-CimInstance -ClassName Win32_OperatingSystem |
+    Select-Object Caption, Version, OSArchitecture |
+    ConvertTo-Json -Compress
+```
+
+Do not use `Get-ComputerInfo -Property WindowsProductName WindowsVersion`; the property names require a comma and may vary by PowerShell version.
+
+### Boot time and uptime
+
+```powershell
+$os = Get-CimInstance -ClassName Win32_OperatingSystem; [pscustomobject]@{LastBootUpTime=$os.LastBootUpTime; Uptime=((Get-Date)-$os.LastBootUpTime).ToString()} | ConvertTo-Json -Compress
+```
+
+The CIM property is `LastBootUpTime`, not `BootUpTime`. Do not append a stray `}` after the property name.
+
+### GPUs
+
+```powershell
+@(Get-CimInstance -ClassName Win32_VideoController | Select-Object Name, AdapterCompatibility, @{Name='VRAM_MB';Expression={if ($null -ne $_.AdapterRAM) {[math]::Round([uint64]$_.AdapterRAM/1MB)} else {$null}}}) | ConvertTo-Json -Compress
+```
+
+For other domains, prefer native cmdlets, select only requested properties, and bound large lists with `Select-Object -First N`. Confirm sensitive mutations, inspect exact targets first, and verify a mutation once with a read-only command.
+
+## Recovery map
+
+- `PositionalParameterNotFound`: add missing commas between property names or correct named parameters.
+- `UnexpectedToken` or `IncompleteParseException`: remove wrapper-shell quoting, then check the final quote, parenthesis, and brace. Do not paste the tool-call `}` into the command.
+- `CommandNotFoundException`: replace cmd.exe, Bash, or alias syntax with a native PowerShell cmdlet.
+- Empty result with a recovered prompt: verify the class/property name once or use a documented alternative query.
+- Successful result with a recovered prompt: stop executing and answer from the observed rows.

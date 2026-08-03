@@ -177,14 +177,23 @@ func (t *Terminal) processTerminalChunk(chunk string) string {
 
 	var builder strings.Builder
 	for len(combined) > 0 {
-		start := strings.Index(combined, "\x1b]633;cwd=")
+		marker := "\x1b]633;cwd="
+		start := strings.Index(combined, marker)
+		// Windows PowerShell 5.1 does not support the PowerShell 6+ `e
+		// escape. Accept and remove markers emitted by older app builds.
+		legacyMarker := "e]633;cwd="
+		legacyStart := strings.Index(combined, legacyMarker)
+		if legacyStart >= 0 && (start < 0 || legacyStart < start) {
+			start = legacyStart
+			marker = legacyMarker
+		}
 		if start < 0 {
 			builder.WriteString(combined)
 			break
 		}
 
 		builder.WriteString(combined[:start])
-		rest := combined[start+len("\x1b]633;cwd="):]
+		rest := combined[start+len(marker):]
 		belIdx := strings.Index(rest, "\x07")
 		stIdx := strings.Index(rest, "\x1b\\")
 
@@ -235,7 +244,7 @@ func (t *Terminal) installCwdTracking() error {
 	case "fish":
 		initScript = "if not set -q __DKST_CWD_HOOK; function __dkst_emit_cwd; printf '\\033]633;cwd=%s\\a' \"$PWD\"; end; if functions -q fish_prompt; functions -c fish_prompt __dkst_original_fish_prompt; function fish_prompt; __dkst_emit_cwd; __dkst_original_fish_prompt; end; end; set -gx __DKST_CWD_HOOK 1; __dkst_emit_cwd; clear; end\r"
 	case "powershell", "pwsh":
-		initScript = "if (-not $global:__DKST_CWD_HOOK) { function global:__dkst_emit_cwd { $Host.UI.Write(\"`e]633;cwd=$($PWD.Path)`a\") }; if (-not $global:__DKST_OriginalPrompt) { $global:__DKST_OriginalPrompt = $function:prompt }; function global:prompt { __dkst_emit_cwd; if ($global:__DKST_OriginalPrompt) { & $global:__DKST_OriginalPrompt } else { \"PS $($executionContext.SessionState.Path.CurrentLocation)> \" } }; $global:__DKST_CWD_HOOK = $true; __dkst_emit_cwd; Clear-Host }\r"
+		initScript = "if (-not $global:__DKST_CWD_HOOK) { function global:__dkst_emit_cwd { $Host.UI.Write(([char]27).ToString() + ']633;cwd=' + $PWD.Path + [char]7) }; if (-not $global:__DKST_OriginalPrompt) { $global:__DKST_OriginalPrompt = $function:prompt }; function global:prompt { __dkst_emit_cwd; if ($global:__DKST_OriginalPrompt) { & $global:__DKST_OriginalPrompt } else { \"PS $($executionContext.SessionState.Path.CurrentLocation)> \" } }; $global:__DKST_CWD_HOOK = $true; __dkst_emit_cwd; Clear-Host }\r"
 	default:
 		return nil
 	}

@@ -6,6 +6,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import DOMPurify from 'dompurify';
+import { marked } from 'marked';
 import '@xterm/xterm/css/xterm.css';
 import './App.css';
 import { getTranslation, Language } from './i18n/translations';
@@ -13,10 +15,15 @@ import {
     buildBaseSystemPrompt,
     buildCompactVisibleChat,
     buildLLMMessages,
+    canonicalizeTerminalCommand,
     clampPromptTextFromEnd,
+    correctTotalInstalledMemoryCommand,
+    hasSubstantiveAnswerBeforeToolCall,
+    looksLikeRecoveredShellPromptLine,
     getMissingRequestedLocalFacts,
     getMissingRequiredTerminalActions,
     getPromptVisibleTools,
+    parseTokenStyleToolEnvelope,
     recoverAppToolRoutedAsCommand,
     recoverTrailingJsonToolCall,
     requiresLocalSystemEvidence,
@@ -27,8 +34,10 @@ import {
     shouldRejectUnexpectedDirectoryChange,
     shouldSuppressDuplicateAppToolCall,
     shouldUseComplexTaskMode,
+    stripTokenStyleToolCalls,
+    userForbidsCommandRepeat,
 } from './prompt/harness';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateToolRuntimeSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings, GetAppleIntelligenceStatus, InstallSystemIntegration, UninstallSystemIntegration, ResolveSkillContext, GetUserSkillsDirectory, OpenUserSkillsDirectory } from "../wailsjs/go/app/App";
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, FetchAvailableModels, UnloadModel, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateToolRuntimeSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings, GetAppleIntelligenceStatus, InstallSystemIntegration, UninstallSystemIntegration, ResolveSkillContext, GetUserSkillsDirectory, OpenUserSkillsDirectory } from "../wailsjs/go/app/App";
 import { EventsOn, EventsEmit, WindowFullscreen, WindowIsFullscreen, WindowUnfullscreen } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
@@ -40,15 +49,36 @@ function escapeHtml(text: string): string {
         .replace(/'/g, '&#39;');
 }
 
+marked.setOptions({
+    async: false,
+    breaks: true,
+    gfm: true,
+});
+
+function sanitizeMarkdownHtml(html: string): string {
+    const sanitized = DOMPurify.sanitize(html, {
+        ADD_ATTR: ['target', 'rel'],
+        USE_PROFILES: { html: true },
+    });
+
+    return sanitized.replace(/<a\s+href=/g, '<a target="_blank" rel="noopener noreferrer" href=');
+}
+
 function renderInlineMarkdown(text: string): string {
-    let html = escapeHtml(text);
-    html = html.replace(/:material-([a-z0-9_]+):/g, '<span class="material-symbols-outlined markdown-material-icon" aria-hidden="true">$1</span>');
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-    return html;
+    const icons: string[] = [];
+    const source = text.replace(/:material-([a-z0-9_]+):/g, (_, iconName) => {
+        const token = `MDICON${icons.length}TOKEN`;
+        icons.push(iconName);
+        return token;
+    });
+    let html = String(marked.parseInline(source));
+    icons.forEach((iconName, index) => {
+        html = html.replace(
+            `MDICON${index}TOKEN`,
+            `<span class="material-symbols-outlined markdown-material-icon" aria-hidden="true">${escapeHtml(iconName)}</span>`,
+        );
+    });
+    return sanitizeMarkdownHtml(html);
 }
 
 function isMarkdownTableSeparatorLine(line: string): boolean {
@@ -360,29 +390,7 @@ function renderLooseHtmlBlock(htmlSource: string): string {
 }
 
 function renderMarkdownContent(text: string): string {
-    const placeholders: string[] = [];
-    const stash = (value: string) => {
-        const token = `@@MARKDOWN_BLOCK_${placeholders.length}@@`;
-        placeholders.push(value);
-        return token;
-    };
-
-    let html = text;
-
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, language, code) => {
-        return stash(`<pre><code class="language-${escapeHtml(language || 'plain')}">${escapeHtml(code.trim())}</code></pre>`);
-    });
-
-    html = splitMarkdownBlocks(html)
-        .map(block => renderTextBlock(block.trim()))
-        .filter(Boolean)
-        .join('');
-
-    placeholders.forEach((block, index) => {
-        html = html.replace(`@@MARKDOWN_BLOCK_${index}@@`, block);
-    });
-
-    return html;
+    return sanitizeMarkdownHtml(String(marked.parse(text)));
 }
 
 function renderArtifactBody(content: string): string {
@@ -396,14 +404,14 @@ function renderArtifactBody(content: string): string {
     return renderMarkdownContent(normalized);
 }
 
-function renderMarkdown(text: string): string {
+export function renderMarkdown(text: string): string {
     if (!text) return '';
 
     const placeholders: string[] = [];
     const stash = (value: string) => {
         const token = `@@BLOCK_${placeholders.length}@@`;
         placeholders.push(value);
-        return token;
+        return `\n\n${token}\n\n`;
     };
 
     let html = text.replace(/\r\n/g, '\n').trim();
@@ -602,7 +610,10 @@ function renderMarkdown(text: string): string {
     html = renderMarkdownContent(html);
 
     placeholders.forEach((block, index) => {
-        html = html.replace(`@@BLOCK_${index}@@`, block);
+        const token = `@@BLOCK_${index}@@`;
+        html = html
+            .replace(`<p>${token}</p>`, block)
+            .replace(token, block);
     });
 
     return html;
@@ -989,7 +1000,7 @@ const serializeToolCallForHistory = (toolName: string, toolArgs: string): string
     return `<${normalizedToolName}>${normalizedArgs || '{}'}</${normalizedToolName}>`;
 };
 
-const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
+export const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const normalizedResponse = normalizeEscapedXmlToolTags(response);
     const executeRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*<<</;
     const forgivingExecuteRegex = /(?:>>>|<<<)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)\s*<<</;
@@ -1011,6 +1022,48 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const bareExecuteRegex = /(?:^|\n)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*(?:\n|$)/i;
     const bareSendKeysRegex = /(?:^|\n)\s*SEND_KEYS:\s*(\[[\s\S]*?\])\s*(?:\n|$)/i;
     const bareGenericToolRegex = /(?:^|\n)\s*([A-Z][A-Z0-9_]+)\s*:\s*({[\s\S]*?})\s*(?:\n|$)/;
+
+    // Chat-template tokens emitted by models such as Qwen and DeepSeek.
+    // Accept the canonical closing token as well as the common malformed
+    // <tool_call> suffix produced by smaller local models.
+    const tokenToolMatch = parseTokenStyleToolEnvelope(normalizedResponse);
+    if (tokenToolMatch) {
+        const toolName = tokenToolMatch.toolName;
+        const payload = parseToolPayloadObject(tokenToolMatch.payloadText);
+        if (!payload) return null;
+
+        if (toolName === 'execute_command') {
+            const normalized = normalizeExecuteCommandPayload(payload, tokenToolMatch.payloadText);
+            if (!normalized) return null;
+            return {
+                raw: tokenToolMatch.raw,
+                toolName,
+                commandText: normalized.commandText,
+                parsedKeys: [],
+                toolArgs: normalized.toolArgs,
+            };
+        }
+
+        if (toolName === 'send_keys') {
+            const normalized = normalizeSendKeysPayloadObject(payload, tokenToolMatch.payloadText);
+            if (!normalized) return null;
+            return {
+                raw: tokenToolMatch.raw,
+                toolName,
+                commandText: normalized.commandText,
+                parsedKeys: normalized.parsedKeys,
+                toolArgs: normalized.toolArgs,
+            };
+        }
+
+        return {
+            raw: tokenToolMatch.raw,
+            toolName,
+            commandText: summarizeGenericToolPayload(payload, tokenToolMatch.payloadText),
+            parsedKeys: [],
+            toolArgs: JSON.stringify(payload),
+        };
+    }
 
     const commandMatch = normalizedResponse.match(executeRegex);
     if (commandMatch) {
@@ -1446,6 +1499,8 @@ const detectWindowsPowerShellSyntaxIssue = (command: string): string | null => {
     if (!normalized) return null;
 
     const patterns: Array<{ pattern: RegExp; message: string }> = [
+        { pattern: /^\s*(?:\{\s*["']?command["']?\s*:\s*["']?)?(?:powershell|pwsh)(?:\.exe)?(?:\s|$)/i, message: 'The terminal is already PowerShell. Send the PowerShell script body directly; do not wrap it in another `powershell` or `pwsh` process.' },
+        { pattern: /\|\s*find(?:\.exe)?\b/i, message: 'Use the PowerShell pipeline cmdlet `Select-String` instead of piping to the cmd.exe `find` utility.' },
         { pattern: /\bif\s+exist\b/, message: 'Use PowerShell syntax instead of cmd.exe syntax. Replace `if exist` with `if (Test-Path ...) { ... }`.' },
         { pattern: /\bdir\b(?:\s|$)/, message: 'Use a PowerShell cmdlet such as `Get-ChildItem` instead of `dir`.' },
         { pattern: /\bcopy\b(?:\s|$)/, message: 'Use `Copy-Item` instead of `copy` on Windows PowerShell.' },
@@ -1468,7 +1523,7 @@ const normalizeEscapedXmlToolTags = (value: string): string => (
 );
 
 const stripToolCallMarkup = (value: string): string => (
-    normalizeEscapedXmlToolTags(value)
+    stripTokenStyleToolCalls(normalizeEscapedXmlToolTags(value))
         .replace(/<\/?execution>/gi, '')
         .replace(/<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/g, '')
         .replace(/<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*}\s*>?\s*$/g, '')
@@ -1636,6 +1691,13 @@ type AppleIntelligenceStatusInfo = {
     available: boolean;
     state: string;
     detail?: string;
+};
+
+type ModelInfo = {
+    id: string;
+    displayName: string;
+    loaded: boolean;
+    instanceId?: string;
 };
 
 function appleIntelligenceStatusLabel(
@@ -1893,8 +1955,11 @@ ${t('greeting')}`
     const [currentReasoningStartedAt, setCurrentReasoningStartedAt] = useState<number | null>(null);
     const [currentReasoningDurationMs, setCurrentReasoningDurationMs] = useState(0);
     const [llmProgress, setLlmProgress] = useState<LLMProgressState | null>(null);
-    const [availableModels, setAvailableModels] = useState<string[]>([]);
+    const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
     const [isFetchingModels, setIsFetchingModels] = useState(false);
+    const [modelPickerOpen, setModelPickerOpen] = useState(false);
+    const [modelListError, setModelListError] = useState('');
+    const [unmountingModelInstanceID, setUnmountingModelInstanceID] = useState('');
     const [isFullscreen, setIsFullscreen] = useState(false);
     const messagesRef = useRef<Message[]>(messages);
     const currentThinkingRef = useRef('');
@@ -1902,6 +1967,7 @@ ${t('greeting')}`
     const requestSequenceRef = useRef(0);
     const lastTerminalAssessmentHintRef = useRef('');
     const lastTerminalObservationRef = useRef<TerminalObservation | null>(null);
+    const retainedTerminalObservationRef = useRef<Record<string, TerminalObservation>>({});
     const llmProgressHideTimeoutRef = useRef<number | null>(null);
     const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
     const lastTokenAtRef = useRef<number>(0);
@@ -1938,20 +2004,51 @@ ${t('greeting')}`
 
     const handleFetchModels = async () => {
         setIsFetchingModels(true);
+        setModelListError('');
         try {
-            // @ts-ignore
-            const models = await window.go.main.App.FetchAvailableModels(apiUrl, apiKey);
-            setAvailableModels(models);
-            if (models.length === 0) {
-                alert("모델 목록은 받아왔지만 비어 있습니다. 서버 URL과 모델 서버 상태를 확인해 주세요.");
-            } else if (!models.includes(modelName)) {
-                setModelName(models[0]);
-            }
+            const models = await FetchAvailableModels(provider, apiUrl, apiKey) as ModelInfo[];
+            setAvailableModels(models || []);
         } catch (err) {
             console.error("Failed to fetch models:", err);
-            alert("모델 목록을 가져오는데 실패했습니다. URL과 API Key를 확인해 주세요.");
+            setAvailableModels([]);
+            const message = String(err || '').replace(/^RuntimeError:\s*/i, '').trim();
+            setModelListError(message || t('fetchModelsFailedAlert'));
         } finally {
             setIsFetchingModels(false);
+        }
+    };
+
+    const openModelPicker = () => {
+        setModelPickerOpen(true);
+        setAvailableModels([]);
+        setModelListError('');
+        setUnmountingModelInstanceID('');
+        void handleFetchModels();
+    };
+
+    const closeModelPicker = () => {
+        if (unmountingModelInstanceID) return;
+        setModelPickerOpen(false);
+        setModelListError('');
+    };
+
+    const selectModel = (model: ModelInfo) => {
+        setModelName(model.id);
+        closeModelPicker();
+    };
+
+    const handleUnmountModel = async (model: ModelInfo) => {
+        if (!model.instanceId || unmountingModelInstanceID) return;
+        setUnmountingModelInstanceID(model.instanceId);
+        setModelListError('');
+        try {
+            await UnloadModel(provider, apiUrl, apiKey, model.instanceId);
+            await handleFetchModels();
+        } catch (err) {
+            const message = String(err || '').replace(/^RuntimeError:\s*/i, '').trim();
+            setModelListError(message || t('modelUnloadFailed'));
+        } finally {
+            setUnmountingModelInstanceID('');
         }
     };
 
@@ -3122,16 +3219,7 @@ ${t('greeting')}`
 
 
     const looksLikeShellPromptLine = (line: string): boolean => {
-        const trimmed = line.trim();
-        if (!trimmed) return false;
-        if (/HEREDOC>\s*$/i.test(trimmed)) return false;
-        if (/UW PICO|GNU NANO|\^X EXIT|\(END\)|MANUAL PAGE/i.test(trimmed)) return false;
-
-        return /[%#$]\s*$/.test(trimmed)
-            || /^[^ \n]+@[^ \n]+.*[%#$]\s*$/.test(trimmed)
-            || /(?:^|\/)[^/\n]+\s[%#$]\s*$/.test(trimmed)
-            || /^PS [^\r\n>]+>\s*$/.test(trimmed)
-            || /^[A-Za-z]:\\.*>\s*$/.test(trimmed);
+        return looksLikeRecoveredShellPromptLine(line);
     };
 
     const hasRecoveredShellPrompt = (terminalText: string): boolean => {
@@ -3416,6 +3504,7 @@ ${t('greeting')}`
         const observation = await observeTerminalAfterTool(toolName, commandText, toolResult);
         lastTerminalAssessmentHintRef.current = observation.assessmentHint;
         lastTerminalObservationRef.current = observation;
+        retainedTerminalObservationRef.current[String(activeTabId)] = observation;
         historyToSend.push({
             role: 'user',
             name: 'terminal_observation',
@@ -3433,7 +3522,10 @@ ${t('greeting')}`
         setMessages(prev => {
             const last = prev[prev.length - 1];
             if (last?.role === 'assistant') {
-                return prev;
+                const next = [...prev];
+                next[next.length - 1] = { ...last, content: '', reasoning: '' };
+                messagesRef.current = next;
+                return next;
             }
             const next: Message[] = [...prev, { role: 'assistant', content: '', reasoning: '' }];
             messagesRef.current = next;
@@ -3823,6 +3915,7 @@ ${t('greeting')}`
             let toolLoopCount = 0;
             let completedToolExecutions = 0;
             let terminalRecoveryPromptCount = 0;
+            let terminalDuplicateSuppressionCount = 0;
             const executedToolSignatures = new Map<string, number>();
             const executedToolResults = new Map<string, string>();
             const executedTerminalCommands: string[] = [];
@@ -3846,31 +3939,66 @@ ${t('greeting')}`
                         ? normalizeSendKeysForTerminal(parsedKeys)
                         : null;
                     const effectiveParsedKeys = normalizedSendKeys?.keys || parsedKeys;
-                    const effectiveCommandText = toolName === 'send_keys'
+                    let effectiveCommandText = toolName === 'send_keys'
                         ? JSON.stringify(effectiveParsedKeys)
                         : commandText;
-                    const effectiveToolArgs = toolName === 'send_keys'
+                    let effectiveToolArgs = toolName === 'send_keys'
                         ? JSON.stringify({ keys: effectiveParsedKeys })
                         : toolArgs;
+                    if (toolName === 'execute_command') {
+                        effectiveCommandText = correctTotalInstalledMemoryCommand(
+                            trimmedInput,
+                            effectiveCommandText,
+                            window.navigator.platform.toLowerCase().includes('win'),
+                        );
+                        effectiveToolArgs = JSON.stringify({ command: effectiveCommandText });
+                    }
                     const missingRequiredToolArgs = (
-                        (toolName === 'execute_command' || toolName === 'send_keys')
-                        && !effectiveToolArgs.trim()
+                        (toolName === 'execute_command' && !effectiveCommandText.trim())
+                        || (toolName === 'send_keys' && effectiveParsedKeys.length === 0)
                     );
-                    const commandPolicy = classifyCommand(commandText);
+                    const commandPolicy = classifyCommand(effectiveCommandText);
                     const windowsCmdSyntaxError = toolName === 'execute_command' && window.navigator.platform.toLowerCase().includes('win')
-                        ? detectWindowsPowerShellSyntaxIssue(commandText)
+                        ? detectWindowsPowerShellSyntaxIssue(effectiveCommandText)
                         : null;
                     const toolIsAvailable = activeTools.some(tool => tool.name === toolName);
                     const toolSignature = serializeToolCallForHistory(toolName, effectiveToolArgs);
                     const previousExecutionCount = executedToolSignatures.get(toolSignature) || 0;
-                    const previousTerminalObservation = lastTerminalObservationRef.current as TerminalObservation | null;
+                    const currentTurnTerminalObservation = lastTerminalObservationRef.current as TerminalObservation | null;
+                    const repeatForbiddenByUser = userForbidsCommandRepeat(trimmedInput);
+                    const previousTerminalObservation = currentTurnTerminalObservation
+                        || (repeatForbiddenByUser ? retainedTerminalObservationRef.current[String(activeTabId)] || null : null);
+                    const repeatsObservedCommand = toolName === 'execute_command'
+                        && Boolean(previousTerminalObservation)
+                        && canonicalizeTerminalCommand(previousTerminalObservation?.commandText || '') === canonicalizeTerminalCommand(effectiveCommandText);
                     const successfulDuplicateObservation = toolName === 'execute_command'
-                        && previousExecutionCount > 0
+                        && repeatsObservedCommand
+                        && (Boolean(currentTurnTerminalObservation) || repeatForbiddenByUser)
                         && previousTerminalObservation?.assessmentHint === 'prompt_recovered'
-                        && normalizeCommandForTerminal(previousTerminalObservation.commandText) === normalizeCommandForTerminal(effectiveCommandText);
+                        ;
+                    const failedDuplicateObservation = toolName === 'execute_command'
+                        && repeatsObservedCommand
+                        && (Boolean(currentTurnTerminalObservation) || repeatForbiddenByUser)
+                        && ['command_failed', 'error_output_detected'].includes(previousTerminalObservation?.assessmentHint || '')
+                        ;
+                    const trailingVerificationAfterAnswer = toolName === 'execute_command'
+                        && completedToolExecutions > 0
+                        && previousTerminalObservation?.assessmentHint === 'prompt_recovered'
+                        && !complexRequest
+                        && hasSubstantiveAnswerBeforeToolCall(response, raw);
+                    const answerBeforeToolCall = trailingVerificationAfterAnswer
+                        ? stripToolCallMarkup(response.slice(0, response.indexOf(raw)).trim())
+                        : '';
 
                     // Filter out the tool call from the response to prevent loops and show only final text
                     response = stripToolCallMarkup(response.replace(raw, '').trim());
+
+                    // The prior command completed and the model already answered. A tool call
+                    // appended after that answer is speculative verification, not required work.
+                    if (trailingVerificationAfterAnswer) {
+                        response = answerBeforeToolCall;
+                        break;
+                    }
 
                     if (recoveredRoute.error) {
                         ensureAssistantPlaceholder();
@@ -3900,8 +4028,53 @@ ${t('greeting')}`
                     // loop deterministically and surface the evidence instead of burning the
                     // remaining tool budget.
                     if (successfulDuplicateObservation && previousTerminalObservation) {
-                        response = response || buildTerminalEvidenceFallback(previousTerminalObservation);
-                        break;
+                        if (terminalDuplicateSuppressionCount >= 1) {
+                            response = response || buildTerminalEvidenceFallback(previousTerminalObservation);
+                            break;
+                        }
+                        terminalDuplicateSuppressionCount += 1;
+                        executedToolSignatures.set(toolSignature, previousExecutionCount + 1);
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            effectiveToolArgs,
+                            `Duplicate terminal command suppressed before execution. The prior command already completed successfully. Answer the user now from this observed evidence and do not emit another tool call:\n${previousTerminalObservation.recentEvidence}`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                            toolLoopCount,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
+                    }
+
+                    if (failedDuplicateObservation && previousTerminalObservation) {
+                        if (terminalDuplicateSuppressionCount >= 1) {
+                            response = response || `The identical failed command was suppressed. ${buildTerminalEvidenceFallback(previousTerminalObservation)}`;
+                            break;
+                        }
+                        terminalDuplicateSuppressionCount += 1;
+                        executedToolSignatures.set(toolSignature, 1);
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            effectiveToolArgs,
+                            `Duplicate failed terminal command suppressed before execution. Do not repeat it. Issue at most one materially different safe command if the request still lacks evidence; otherwise answer from the observation:\n${previousTerminalObservation.recentEvidence}`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                            toolLoopCount,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
                     }
 
                     if (shouldSuppressDuplicateAppToolCall(toolName, previousExecutionCount)) {
@@ -4007,17 +4180,23 @@ ${t('greeting')}`
                     }
 
                     if (windowsCmdSyntaxError) {
-                        commandIntercepted = true;
-                        setMessages(prev => {
-                            const next = [...prev, {
-                                role: 'system' as const,
-                                content: `${response ? `${response}\n\n` : ''}${t('windowsPsOnly')} ${windowsCmdSyntaxError}`,
-                            }];
-                            messagesRef.current = next;
-                            return next;
-                        });
-                        response = '';
-                        break;
+                        executedToolSignatures.set(toolSignature, previousExecutionCount + 1);
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            effectiveToolArgs,
+                            `Error: command rejected before execution. ${windowsCmdSyntaxError} Re-issue one corrected PowerShell command without a nested shell wrapper, or answer now if the observed evidence is already sufficient.`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                            toolLoopCount,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
                     }
 
                     if (toolName === 'execute_command' && commandPolicy.status === 'blocked') {
@@ -4392,12 +4571,7 @@ ${t('chatCleared')}`
                             <button className="icon-btn no-select" title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"} onClick={handleToggleFullscreen}>
                                 <MaterialIcon name="fit_screen" />
                             </button>
-                            <button className="icon-btn no-select" title="Settings" onClick={() => {
-                                setIsSettingsOpen(true);
-                                if (provider === 'LM Studio' && availableModels.length === 0) {
-                                    handleFetchModels();
-                                }
-                            }}>
+                            <button className="icon-btn no-select" title="Settings" onClick={() => setIsSettingsOpen(true)}>
                                 <MaterialIcon name="settings" />
                             </button>
                         </div>
@@ -4583,16 +4757,10 @@ ${t('chatCleared')}`
                                                 <div className="settings-field">
                                                     <label>{t('modelKey')}</label>
                                                     <div className="model-selection-group">
-                                                        {provider === 'LM Studio' && availableModels.length > 0 ? (
-                                                            <select value={modelName} onChange={e => setModelName(e.target.value)} className="model-select">
-                                                                {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-                                                            </select>
-                                                        ) : (
-                                                            <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} {...textAssistOffProps} />
-                                                        )}
+                                                        <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} {...textAssistOffProps} />
                                                         {provider === 'LM Studio' && (
-                                                            <button className="refresh-models-btn" onClick={handleFetchModels} disabled={isFetchingModels} title={t('fetchModels')}>
-                                                                {isFetchingModels ? '...' : t('fetchModels')}
+                                                            <button type="button" className="refresh-models-btn" onClick={openModelPicker} title={t('fetchModels')}>
+                                                                {t('fetchModels')}
                                                             </button>
                                                         )}
                                                     </div>
@@ -4796,6 +4964,55 @@ ${t('chatCleared')}`
                                 <button className="save-btn" onClick={handleSaveSettings}>{t('applySave')}</button>
                             </div>
                         </div>
+                    </div>
+                )}
+                {modelPickerOpen && provider === 'LM Studio' && (
+                    <div className="model-picker-overlay" onClick={e => e.currentTarget === e.target && closeModelPicker()}>
+                        <section className="model-picker-modal" role="dialog" aria-modal="true" aria-labelledby="model-picker-title">
+                            <div className="model-picker-header">
+                                <div>
+                                    <h3 id="model-picker-title">{t('modelPickerTitle')}</h3>
+                                    <p>{t('modelPickerDescription')}</p>
+                                </div>
+                                <div className="model-picker-actions">
+                                    <button type="button" onClick={() => void handleFetchModels()} disabled={isFetchingModels || !!unmountingModelInstanceID} title={t('refreshModels')} aria-label={t('refreshModels')}>
+                                        <MaterialIcon name="refresh" />
+                                    </button>
+                                    <button type="button" onClick={closeModelPicker} disabled={!!unmountingModelInstanceID} title={t('close')} aria-label={t('close')}>
+                                        <MaterialIcon name="close" />
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="model-list" role="listbox" aria-label={t('modelPickerTitle')}>
+                                {isFetchingModels && availableModels.length === 0 ? (
+                                    <div className="model-list-state">{t('loadingModels')}</div>
+                                ) : modelListError && availableModels.length === 0 ? (
+                                    <div className="model-list-state error">{modelListError}</div>
+                                ) : availableModels.length === 0 ? (
+                                    <div className="model-list-state">{t('noModelsAvailable')}</div>
+                                ) : availableModels.map(model => {
+                                    const selected = model.id === modelName;
+                                    const unmounting = model.instanceId === unmountingModelInstanceID;
+                                    return (
+                                        <div key={model.id} className={`model-list-row ${selected ? 'selected' : ''}`}>
+                                            <button type="button" className="model-list-select" role="option" aria-selected={selected} disabled={!!unmountingModelInstanceID} onClick={() => selectModel(model)}>
+                                                <strong>{model.displayName || model.id}</strong>
+                                                <span className="model-list-meta">
+                                                    {model.loaded && <span className="model-loaded-badge">{t('loadedModel')}</span>}
+                                                    {(selected || model.displayName !== model.id) && <span>{model.id}</span>}
+                                                </span>
+                                            </button>
+                                            {model.loaded && model.instanceId && (
+                                                <button type="button" className="model-unmount-btn" disabled={!!unmountingModelInstanceID} onClick={() => void handleUnmountModel(model)} title={unmounting ? t('unmountingModel') : t('unmountModel')} aria-label={unmounting ? t('unmountingModel') : t('unmountModel')}>
+                                                    {unmounting ? '...' : <MaterialIcon name="eject" />}
+                                                </button>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            {modelListError && availableModels.length > 0 && <div className="model-picker-error">{modelListError}</div>}
+                        </section>
                     </div>
                 )}
             </div>

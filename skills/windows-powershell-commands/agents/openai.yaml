@@ -1,4 +1,4 @@
 interface:
   display_name: "Windows PowerShell Commands"
-  short_description: "Reliable native PowerShell commands for Windows terminal tasks"
-  default_prompt: "Use $windows-powershell-commands to complete this Windows terminal task with native PowerShell."
+  short_description: "Reliable PowerShell syntax, evidence, and recovery"
+  default_prompt: "Use $windows-powershell-commands to run this Windows task with native PowerShell, interpret the observed output, and stop once the requested evidence is complete."

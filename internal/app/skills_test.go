@@ -118,3 +118,29 @@ func TestSkillContextLimitUsesRunes(t *testing.T) {
 		t.Fatalf("expected truncation marker: %q", clamped[len(clamped)-40:])
 	}
 }
+
+func TestBundledPowerShellSkillKeepsCriticalRulesWithinPromptLimit(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "skills", "windows-powershell-commands", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, ok := parseSkillDocument(content, "builtin")
+	if !ok {
+		t.Fatal("PowerShell skill did not parse")
+	}
+	context := clampSkillContext("ACTIVE SKILL: "+document.Name+"\nSOURCE: builtin\n\n"+document.Body, defaultSkillContextLimit)
+	for _, required := range []string{
+		"Never prefix a command with `powershell`",
+		"The JSON closing `}`",
+		"Do not run the same command again",
+		"PositionalParameterNotFound",
+		"Successful result with a recovered prompt",
+	} {
+		if !strings.Contains(context, required) {
+			t.Fatalf("critical PowerShell rule %q is missing from injected context", required)
+		}
+	}
+	if strings.Contains(context, "skill content truncated") {
+		t.Fatalf("PowerShell skill exceeds the default context limit: %d runes", len([]rune(document.Body)))
+	}
+}
