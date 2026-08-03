@@ -8,7 +8,6 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './App.css';
-import mcpDocsContent from './assets/docs/mcp.md?raw';
 import { getTranslation, Language } from './i18n/translations';
 import {
     buildBaseSystemPrompt,
@@ -18,6 +17,7 @@ import {
     getMissingRequestedLocalFacts,
     getMissingRequiredTerminalActions,
     getPromptVisibleTools,
+    recoverAppToolRoutedAsCommand,
     recoverTrailingJsonToolCall,
     requiresLocalSystemEvidence,
     shouldContinueAfterDelegatedAction,
@@ -25,9 +25,10 @@ import {
     shouldRedirectWebToolToLocalSystem,
     shouldRetryAfterTerminalAssessment,
     shouldRejectUnexpectedDirectoryChange,
+    shouldSuppressDuplicateAppToolCall,
     shouldUseComplexTaskMode,
 } from './prompt/harness';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/app/App";
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateToolRuntimeSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/app/App";
 import { EventsOn, EventsEmit, WindowFullscreen, WindowIsFullscreen, WindowUnfullscreen } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
@@ -1646,7 +1647,6 @@ function App() {
     const [tabs, setTabs] = useState<Tab[]>([{ id: '1', name: 'Tab 1' }]);
     const [activeTabId, setActiveTabId] = useState('1');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const [isMcpDocsOpen, setIsMcpDocsOpen] = useState(false);
     const [runtimePlatform, setRuntimePlatform] = useState('unknown');
 
     // Settings with persistence
@@ -1674,10 +1674,7 @@ function App() {
         return saved;
     });
     const [chatWidth, setChatWidth] = useState(() => Number(localStorage.getItem('chatWidth')) || 450);
-    const [mcpPort, setMcpPort] = useState(() => Number(localStorage.getItem('mcpPort')) || 4321);
-    const [mcpLabel, setMcpLabel] = useState(() => localStorage.getItem('mcpLabel') || 'dinkisstyle-terminal');
     const [maxTokensInput, setMaxTokensInput] = useState(() => String(Number(localStorage.getItem('maxTokens')) || 10000));
-    const [mcpPortInput, setMcpPortInput] = useState(() => String(Number(localStorage.getItem('mcpPort')) || 4321));
     const [debugPanelEnabled, setDebugPanelEnabled] = useState(() => localStorage.getItem('debugPanelEnabled') === 'true');
     const [debugPanelTab, setDebugPanelTab] = useState<DebugPanelTab>('context');
     const [debugTrace, setDebugTrace] = useState<DebugTrace>(() => createEmptyDebugTrace());
@@ -1686,7 +1683,7 @@ function App() {
     const [approvalCommandPatterns, setApprovalCommandPatterns] = useState(() => localStorage.getItem('approvalCommandPatterns') || DEFAULT_APPROVAL_COMMAND_PATTERNS);
     const isResizing = useRef(false);
 
-    // MCP Settings with persistence
+    // App-managed tool settings with persistence
     const [enabledTools, setEnabledTools] = useState<string[]>(() => {
         try {
             const saved = localStorage.getItem('enabledTools');
@@ -1728,28 +1725,21 @@ function App() {
         localStorage.setItem('chatFontSize', String(chatFontSize));
         localStorage.setItem('chatFontFamily', chatFontFamily);
         localStorage.setItem('chatWidth', String(chatWidth));
-        localStorage.setItem('mcpPort', String(mcpPort));
-        localStorage.setItem('mcpLabel', mcpLabel);
         localStorage.setItem('blockedCommandPatterns', blockedCommandPatterns);
         localStorage.setItem('approvalCommandPatterns', approvalCommandPatterns);
         localStorage.setItem('enabledTools', JSON.stringify(enabledTools));
         localStorage.setItem('debugPanelEnabled', String(debugPanelEnabled));
-    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, toolTemperature, provider, globalUserPrompt, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, mcpPort, mcpLabel, blockedCommandPatterns, approvalCommandPatterns, enabledTools, debugPanelEnabled]);
+    }, [language, apiUrl, apiKey, modelName, maxTokens, temperature, toolTemperature, provider, globalUserPrompt, termFontSize, termFontFamily, termForeground, termBackground, chatFontSize, chatFontFamily, chatWidth, blockedCommandPatterns, approvalCommandPatterns, enabledTools, debugPanelEnabled]);
 
     const handleSaveSettings = () => {
         const nextMaxTokens = Number.parseInt(maxTokensInput, 10);
-        const nextMcpPort = Number.parseInt(mcpPortInput, 10);
         const resolvedMaxTokens = Number.isFinite(nextMaxTokens) && nextMaxTokens > 0 ? nextMaxTokens : maxTokens;
-        const resolvedMcpPort = Number.isFinite(nextMcpPort) && nextMcpPort > 0 ? nextMcpPort : mcpPort;
 
         setMaxTokens(resolvedMaxTokens);
-        setMcpPort(resolvedMcpPort);
         setMaxTokensInput(String(resolvedMaxTokens));
-        setMcpPortInput(String(resolvedMcpPort));
 
-        UpdateMCPSettings(resolvedMcpPort, mcpLabel, debugPanelEnabled);
+        UpdateToolRuntimeSettings(debugPanelEnabled);
         setIsSettingsOpen(false);
-        setIsMcpDocsOpen(false);
     };
 
     useEffect(() => {
@@ -1757,12 +1747,8 @@ function App() {
     }, [maxTokens]);
 
     useEffect(() => {
-        setMcpPortInput(String(mcpPort));
-    }, [mcpPort]);
-
-    useEffect(() => {
-        UpdateMCPSettings(mcpPort, mcpLabel, debugPanelEnabled).catch((error: unknown) => {
-            console.error('[MCP] Failed to apply persisted MCP settings on startup:', error);
+        UpdateToolRuntimeSettings(debugPanelEnabled).catch((error: unknown) => {
+            console.error('[Tool Runtime] Failed to apply persisted settings on startup:', error);
         });
     }, []);
 
@@ -1773,12 +1759,6 @@ function App() {
                 console.error('Failed to get runtime platform:', error);
             });
     }, []);
-
-    useEffect(() => {
-        if (!isSettingsOpen) {
-            setIsMcpDocsOpen(false);
-        }
-    }, [isSettingsOpen]);
 
     useEffect(() => {
         SetActiveTab(activeTabId);
@@ -1804,7 +1784,7 @@ function App() {
             content: `<analysis>System Initialization</analysis>
 <progress title="${t('greetingTitle')}" description="${t('greetingDesc')}">
 1. Terminal connected to active tab
-2. MCP tools loaded and ready
+2. App tools loaded and ready
 3. Markdown renderer initialized
 </progress>
 ${t('greeting')}`
@@ -3282,9 +3262,9 @@ ${t('greeting')}`
                         if (fallbackResult) {
                             resolve(fallbackResult);
                         } else if (toolName === 'send_keys') {
-                            resolve('Keys sent to terminal (client timeout while waiting for MCP acknowledgement).');
+                            resolve('Keys sent to terminal (client timeout while waiting for tool acknowledgement).');
                         } else if (toolName === 'read_terminal_tail') {
-                            resolve('(terminal tail unavailable: client timeout while waiting for MCP acknowledgement)');
+                            resolve('(terminal tail unavailable: client timeout while waiting for tool acknowledgement)');
                         } else {
                             resolve('Tool completed, but the client timed out while waiting for the result.');
                         }
@@ -3294,7 +3274,7 @@ ${t('greeting')}`
 
             return {
                 result,
-                timedOut: result.includes('client timeout while waiting for MCP acknowledgement'),
+                timedOut: result.includes('client timeout while waiting for tool acknowledgement'),
             };
         } finally {
             if (timeoutHandle !== null) {
@@ -3495,7 +3475,7 @@ ${t('greeting')}`
             setMessages(prev => [...prev, {
                 role: 'tool',
                 name: request.toolName,
-                content: `Command: \`${request.command}\`${timedOut ? `\n\nNote: ${t('mcpTimeout')}` : ''}\n\nStatus: ${result}`
+                content: `Command: \`${request.command}\`${timedOut ? `\n\nNote: ${t('toolTimeout')}` : ''}\n\nStatus: ${result}`
             }]);
 
             let response = buildTerminalToolSummary('execute_command', request.command, request.responseSansCommand);
@@ -3586,7 +3566,7 @@ ${t('greeting')}`
             const complexRequest = shouldUseComplexTaskMode(trimmedInput);
             const currentWorkingDirectory = getKnownTerminalCwd(activeTabId) || '(unknown)';
             const baseSystemPrompt = buildBaseSystemPrompt({
-                mcpLabel,
+                assistantName: 'DKST Terminal AI',
                 currentOS: window.navigator.platform,
                 currentWorkingDirectory,
                 currentRequest: trimmedInput,
@@ -3743,6 +3723,7 @@ ${t('greeting')}`
             let completedToolExecutions = 0;
             let terminalRecoveryPromptCount = 0;
             const executedToolSignatures = new Map<string, number>();
+            const executedToolResults = new Map<string, string>();
             const executedTerminalCommands: string[] = [];
             while (true) {
                 if (!isCurrentRequest()) return;
@@ -3757,7 +3738,9 @@ ${t('greeting')}`
                     parsedToolCall: parsedToolCall ? maskSensitiveText(safeJsonStringify(parsedToolCall), apiKey) : '(no tool call parsed)',
                 });
                 if (parsedToolCall) {
-                    const { raw, toolName, commandText, parsedKeys, toolArgs } = parsedToolCall;
+                    const { raw, parsedKeys } = parsedToolCall;
+                    const recoveredRoute = recoverAppToolRoutedAsCommand(parsedToolCall, activeTools);
+                    const { toolName, commandText, toolArgs } = recoveredRoute;
                     const normalizedSendKeys = toolName === 'send_keys'
                         ? normalizeSendKeysForTerminal(parsedKeys)
                         : null;
@@ -3788,6 +3771,29 @@ ${t('greeting')}`
                     // Filter out the tool call from the response to prevent loops and show only final text
                     response = stripToolCallMarkup(response.replace(raw, '').trim());
 
+                    if (recoveredRoute.error) {
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            toolArgs,
+                            `Error: ${recoveredRoute.error} Emit the app tool using its exact listed tag and JSON schema. Do not send app tool names to execute_command.`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                            toolLoopCount,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
+                    }
+
+                    if (recoveredRoute.recovered) {
+                        console.log(`[Tool Runtime] Recovered ${toolName} from a misrouted execute_command call.`);
+                    }
+
                     // Small local models occasionally call the exact same read-only command
                     // after its output and recovered prompt were already observed. Stop that
                     // loop deterministically and surface the evidence instead of burning the
@@ -3795,6 +3801,32 @@ ${t('greeting')}`
                     if (successfulDuplicateObservation && previousTerminalObservation) {
                         response = response || buildTerminalEvidenceFallback(previousTerminalObservation);
                         break;
+                    }
+
+                    if (shouldSuppressDuplicateAppToolCall(toolName, previousExecutionCount)) {
+                        const previousResult = executedToolResults.get(toolSignature) || '(previous tool result unavailable)';
+                        if (previousExecutionCount >= 2) {
+                            response = response || `The repeated ${toolName} call was suppressed. Previous observed result:\n\n${previousResult}`;
+                            break;
+                        }
+
+                        executedToolSignatures.set(toolSignature, previousExecutionCount + 1);
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            effectiveToolArgs,
+                            `Duplicate app tool call suppressed; do not call ${toolName} again with the same arguments. Use this previous observed result to answer the user now:\n${previousResult}`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                            toolLoopCount,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
                     }
 
                     if (toolName === 'execute_command' && shouldRejectUnexpectedDirectoryChange(trimmedInput, effectiveCommandText)) {
@@ -3943,15 +3975,16 @@ ${t('greeting')}`
                         const { result, timedOut } = await callToolWithClientTimeout(toolName, effectiveToolArgs);
                         completedToolExecutions += 1;
                         executedToolSignatures.set(toolSignature, previousExecutionCount + 1);
+                        executedToolResults.set(toolSignature, result);
                         if (toolName === 'execute_command') {
                             executedTerminalCommands.push(normalizeCommandForTerminal(effectiveCommandText));
                         }
                         if (!isCurrentRequest()) return;
-                        console.log(`[MCP] Tool ${toolName} result:`, result);
+                        console.log(`[Tool Runtime] Tool ${toolName} result:`, result);
                         const toolResultForUi: Message = {
                             role: 'tool',
                             name: toolName,
-                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${effectiveCommandText}\`${normalizedSendKeys?.reason ? `\n\nRemap: ${normalizedSendKeys.reason}` : ''}${timedOut ? `\n\nNote: ${t('mcpTimeout')}` : ''}\n\nStatus: ${result}`
+                            content: `${toolName === 'send_keys' ? 'Keys' : 'Command'}: \`${effectiveCommandText}\`${normalizedSendKeys?.reason ? `\n\nRemap: ${normalizedSendKeys.reason}` : ''}${timedOut ? `\n\nNote: ${t('toolTimeout')}` : ''}\n\nStatus: ${result}`
                         };
                         setMessages(prev => {
                             const next = [...prev, toolResultForUi];
@@ -4506,36 +4539,8 @@ ${t('chatCleared')}`
                                     </div>
                                 </div>
                                 <div className="settings-section">
-                                    <div className="settings-section-title">
-                                        <h4>{t('mcpConfig')}</h4>
-                                        <button
-                                            className="settings-help-btn"
-                                            type="button"
-                                            onClick={() => setIsMcpDocsOpen(true)}
-                                            title={t('mcpDocsBtn')}
-                                            aria-label={t('mcpDocsBtn')}
-                                        >
-                                            <MaterialIcon name="info" />
-                                        </button>
-                                    </div>
-                                    <div className="settings-grid">
-                                        <div className="settings-field">
-                                            <label>{t('mcpPort')}</label>
-                                            <input
-                                                type="text"
-                                                inputMode="numeric"
-                                                pattern="[0-9]*"
-                                                value={mcpPortInput}
-                                                onChange={e => setMcpPortInput(keepDigitsOnly(e.target.value))}
-                                                {...textAssistOffProps}
-                                            />
-                                        </div>
-                                        <div className="settings-field">
-                                            <label>{t('mcpLabel')}</label>
-                                            <input type="text" value={mcpLabel} onChange={e => setMcpLabel(e.target.value)} {...textAssistOffProps} />
-                                            <span style={{ fontSize: '10px', opacity: 0.5 }}>{t('mcpLabelHint')}</span>
-                                        </div>
-                                    </div>
+                                    <h4>{t('toolRuntime')}</h4>
+                                    <span className="settings-hint">{t('toolRuntimeHint')}</span>
                                     <h4 style={{ marginTop: '20px' }}>{t('toolManagement')}</h4>
                                     <div className="tool-toggle-list">
                                         {availableTools.filter(tool => !INTERNAL_ONLY_TOOL_NAMES.has(tool.name)).map(tool => (
@@ -4625,21 +4630,6 @@ ${t('chatCleared')}`
                             <div className="settings-footer">
                                 <div className="settings-footer-copy">(C) 2026 DINKI&apos;ssTyle</div>
                                 <button className="save-btn" onClick={handleSaveSettings}>{t('applySave')}</button>
-                            </div>
-                        </div>
-                    </div>
-                )}
-                {isMcpDocsOpen && (
-                    <div className="settings-overlay docs-overlay" onClick={() => setIsMcpDocsOpen(false)}>
-                        <div className="docs-modal" onClick={e => e.stopPropagation()}>
-                            <div className="docs-modal-header">
-                                <h3>{t('mcpDocsTitle')}</h3>
-                                <button className="close-icon-btn" onClick={() => setIsMcpDocsOpen(false)} aria-label={t('close')}>
-                                    <MaterialIcon name="close" />
-                                </button>
-                            </div>
-                            <div className="docs-modal-body">
-                                <div className="bubble docs-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(mcpDocsContent) }} />
                             </div>
                         </div>
                     </div>

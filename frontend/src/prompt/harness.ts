@@ -8,10 +8,127 @@ export interface PromptVisibleTool {
     name: string;
     description?: string;
     inputSchema?: {
-        properties?: Record<string, unknown>;
+        properties?: Record<string, { type?: string } | unknown>;
         required?: string[];
     };
 }
+
+export type AppToolRouteRecovery = {
+    toolName: string;
+    commandText: string;
+    toolArgs: string;
+    recovered: boolean;
+    error?: string;
+};
+
+const unwrapInvocationValue = (value: string): string => {
+    let normalized = value.trim();
+    if (normalized.startsWith('(') && normalized.endsWith(')')) {
+        normalized = normalized.slice(1, -1).trim();
+    }
+    if (
+        normalized.length >= 2
+        && ((normalized.startsWith('"') && normalized.endsWith('"'))
+            || (normalized.startsWith("'") && normalized.endsWith("'")))
+    ) {
+        normalized = normalized.slice(1, -1);
+    }
+    return normalized.trim();
+};
+
+// Some local models put an app tool invocation inside execute_command, for
+// example `search_web latest GPU news`. Detect that shape before anything is
+// sent to the shell and recover it through the shared tool registry.
+export const recoverAppToolRoutedAsCommand = (
+    call: Pick<AppToolRouteRecovery, 'toolName' | 'commandText' | 'toolArgs'>,
+    availableTools: PromptVisibleTool[],
+): AppToolRouteRecovery => {
+    const unchanged = { ...call, recovered: false };
+    if (call.toolName !== 'execute_command') return unchanged;
+
+    const normalizedCommand = call.commandText.trim();
+    const normalizedLower = normalizedCommand.toLowerCase();
+    const target = [...availableTools]
+        .filter(tool => tool.name !== 'execute_command' && tool.name !== 'send_keys')
+        .sort((left, right) => right.name.length - left.name.length)
+        .find((tool) => {
+            const toolName = tool.name.toLowerCase();
+            if (!normalizedLower.startsWith(toolName)) return false;
+            const boundary = normalizedCommand.charAt(tool.name.length);
+            return !boundary || /[\s{(]/.test(boundary);
+        });
+    if (!target) return unchanged;
+
+    let rawArguments = normalizedCommand.slice(target.name.length).trim();
+    if (!rawArguments) {
+        return {
+            toolName: target.name,
+            commandText: '',
+            toolArgs: '{}',
+            recovered: true,
+            error: `${target.name} was routed as a terminal command but its arguments were missing.`,
+        };
+    }
+
+    if (rawArguments.startsWith('(') && rawArguments.endsWith(')')) {
+        rawArguments = rawArguments.slice(1, -1).trim();
+    }
+
+    if (rawArguments.startsWith('{')) {
+        try {
+            const parsed = JSON.parse(rawArguments);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return {
+                    toolName: target.name,
+                    commandText: rawArguments,
+                    toolArgs: JSON.stringify(parsed),
+                    recovered: true,
+                };
+            }
+        } catch {
+            return {
+                toolName: target.name,
+                commandText: rawArguments,
+                toolArgs: '{}',
+                recovered: true,
+                error: `${target.name} was routed as a terminal command with invalid JSON arguments.`,
+            };
+        }
+    }
+
+    const properties = target.inputSchema?.properties || {};
+    const propertyNames = Object.keys(properties);
+    const required = Array.isArray(target.inputSchema?.required) ? target.inputSchema?.required || [] : [];
+    const argumentName = required.length === 1
+        ? required[0]
+        : propertyNames.length === 1
+            ? propertyNames[0]
+            : '';
+
+    if (!argumentName) {
+        return {
+            toolName: target.name,
+            commandText: rawArguments,
+            toolArgs: '{}',
+            recovered: true,
+            error: `${target.name} requires structured JSON arguments and cannot be interpreted as a terminal command.`,
+        };
+    }
+
+    const value = unwrapInvocationValue(rawArguments);
+    return {
+        toolName: target.name,
+        commandText: value,
+        toolArgs: JSON.stringify({ [argumentName]: value }),
+        recovered: true,
+    };
+};
+
+export const shouldSuppressDuplicateAppToolCall = (toolName: string, previousExecutionCount: number): boolean => (
+    previousExecutionCount > 0
+    && toolName !== 'execute_command'
+    && toolName !== 'send_keys'
+);
 
 type TaskMemory = {
     request: string;
@@ -40,7 +157,7 @@ type BuildLLMMessagesArgs = {
 };
 
 type BuildBaseSystemPromptArgs = {
-    mcpLabel: string;
+    assistantName: string;
     currentOS: string;
     currentWorkingDirectory: string;
     currentRequest: string;
@@ -577,12 +694,28 @@ const renderAvailableToolsForPrompt = (tools: PromptVisibleTool[]): string => {
         const propertyNames = Object.keys(schema?.properties || {});
         const rawRequired = schema?.required;
         const required = Array.isArray(rawRequired) ? rawRequired : [];
+        const exampleArgs = propertyNames.reduce<Record<string, unknown>>((result, name) => {
+            const property = schema?.properties?.[name];
+            const propertyType = property && typeof property === 'object' && 'type' in property
+                ? property.type
+                : 'string';
+            result[name] = propertyType === 'integer' || propertyType === 'number'
+                ? 0
+                : propertyType === 'boolean'
+                    ? false
+                    : propertyType === 'array'
+                        ? []
+                        : '...';
+            return result;
+        }, {});
         const argsText = propertyNames.length
             ? ` args: ${propertyNames.map((name) => `${name}${required.includes(name) ? '*' : ''}`).join(', ')}`
             : ' args: none';
-        return `- ${tool.name}: ${(tool.description || '').trim()}${argsText}`;
+        const callExample = `<${tool.name}>${JSON.stringify(exampleArgs)}</${tool.name}>`;
+        return `- ${tool.name}: ${(tool.description || '').trim()}${argsText}; call: ${callExample}`;
     });
 
+    lines.push('- App tool names are not shell commands. Never place search_web, read_web_page, or another listed app tool inside execute_command. Call its own tag exactly as shown above.');
     lines.push('- Use execute_command or another local tool for facts about this computer (boot time, uptime, CPU/GPU, memory, disk, processes, OS, files, or network state). Do not use web search for local machine state.');
     lines.push('- Prefer search_web only for current/latest external internet information when it is available.');
     lines.push('- Use read_web_page only for a specific URL or when the user explicitly asks to inspect a page.');
@@ -616,7 +749,7 @@ ${trimmedGlobalUserPrompt}
         ? ''
         : '\nQuick Request Enforcement: Do not emit <analysis>, <progress>, <tasklist>, <execution_plan>, <artifact>, or a plan. For related read-only facts, combine native commands into one execute_command when safe, observe once, and answer concisely.';
 
-    return `You are ${args.mcpLabel}, a professional AI engineer. 
+    return `You are ${args.assistantName}, a professional AI engineer.
 1. Keep answers compact for a narrow side chat. First decide whether the user's request needs a quick direct response or a planned multi-step task. Use <analysis>, <progress>, and <artifact> only when helpful.
 2. SCREEN_CONTEXT is only for visible UI/terminal/chat state. Do not use it as proof for files, paths, counts, command output, or other verifiable system facts when tools can check them.
 3. Tool syntax is strict. Use exactly one structured format for all tool calls:

@@ -16,7 +16,7 @@ const (
 )
 
 // BufferedWebChunk and BufferedWebSource intentionally mirror the lightweight
-// in-memory portion of the Gateway MCP package. The terminal assistant does not
+// in-memory portion of the app tool package. The terminal assistant does not
 // need Gateway's SQLite/embedding storage, but it keeps the same source-handle
 // contract so tool prompts and callers can behave consistently in both apps.
 type BufferedWebChunk struct {
@@ -115,7 +115,7 @@ func saveBufferedWebSource(userID, toolName, query, pageURL, title, content stri
 		delete(buffer.Sources, oldest)
 	}
 
-	emitTraceEvent("mcp", "buffer.saved", "Buffered web source saved", traceDetailsMap(
+	emitTraceEvent("tool_runtime", "buffer.saved", "Buffered web source saved", traceDetailsMap(
 		"tool", source.ToolName,
 		"user", source.UserID,
 		"source_id", source.SourceID,
@@ -281,7 +281,7 @@ func readBufferedSource(userID, sourceID, query string, maxChunks int) (string, 
 		fmt.Fprintf(&b, "\n[Chunk %d]\n%s\n", chunk.Index+1, chunk.Text)
 	}
 
-	emitTraceEvent("mcp", "buffer.read", "Buffered web source excerpts selected", traceDetailsMap(
+	emitTraceEvent("tool_runtime", "buffer.read", "Buffered web source excerpts selected", traceDetailsMap(
 		"tool", "read_buffered_source",
 		"user", normalizeBufferedUserID(userID),
 		"source_id", source.SourceID,

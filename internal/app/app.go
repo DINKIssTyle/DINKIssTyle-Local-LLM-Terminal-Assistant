@@ -21,8 +21,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"dkst-terminal-assistant/internal/mcp"
 	"dkst-terminal-assistant/internal/terminal"
+	"dkst-terminal-assistant/internal/toolruntime"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -571,9 +571,6 @@ type App struct {
 	terminals         map[string]*terminal.Terminal
 	terminalCwds      map[string]string
 	activeTabId       string
-	mcpPort           int
-	mcpLabel          string
-	mcpServer         *MCPServer
 	lastCommandCursor map[string]int
 	mu                sync.Mutex
 	cancelFunc        context.CancelFunc
@@ -593,7 +590,7 @@ func NewApp() *App {
 // so we can call the runtime methods
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
-	mcp.SetHost(mcp.ToolHostFuncs{
+	toolruntime.Initialize(toolruntime.HostFuncs{
 		ExecuteCommandFunc: func(command string) (string, error) {
 			a.mu.Lock()
 			activeId := a.activeTabId
@@ -657,7 +654,6 @@ func (a *App) Startup(ctx context.Context) {
 			return a.ReadActiveTerminalTail(lines, maxWaitMs, idleMs)
 		},
 	})
-	mcp.SetContext("default", false, nil, "", nil, nil)
 }
 
 // StartTerminal starts the shell process for a specific ID
@@ -835,42 +831,22 @@ func (a *App) ClearTerminalContext(id string) error {
 	return nil
 }
 
-// UpdateMCPSettings updates the internal MCP server configuration
-func (a *App) UpdateMCPSettings(port int, label string, debugEnabled bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// UpdateToolRuntimeSettings updates diagnostics for the provider-independent
+// app tool runtime. Tool registration and execution remain inside the app.
+func (a *App) UpdateToolRuntimeSettings(debugEnabled bool) {
 	setVerboseLoggingEnabled(debugEnabled)
-	mcp.SetVerboseLoggingEnabled(debugEnabled)
-
-	if a.mcpPort != port || a.mcpServer == nil {
-		if port > 0 {
-			if a.mcpServer != nil {
-				a.mcpServer.Stop()
-			}
-			a.mcpPort = port
-			a.mcpServer = NewMCPServer(a)
-			a.mcpServer.Start(port)
-		}
-	}
-	a.mcpLabel = label
-	logVerbosef("[App] MCP Settings updated: Port=%d, Label=%s", port, label)
+	toolruntime.SetVerboseLoggingEnabled(debugEnabled)
+	logVerbosef("[App] Tool runtime settings updated")
 }
 
-func (a *App) handleMCPServerStart() {
-	if a.mcpPort > 0 && a.mcpServer == nil {
-		a.mcpServer = NewMCPServer(a)
-		a.mcpServer.Start(a.mcpPort)
-	}
+// GetTools returns the app-managed tool catalog shared by every provider.
+func (a *App) GetTools() []toolruntime.Tool {
+	return toolruntime.List()
 }
 
-// GetTools returns the list of available MCP tools
-func (a *App) GetTools() []mcp.Tool {
-	return mcp.GetToolList()
-}
-
-// CallTool executes an MCP tool
+// CallTool executes an app-managed tool without involving the model runtime.
 func (a *App) CallTool(name string, arguments string) (string, error) {
-	return mcp.ExecuteToolByName(name, []byte(arguments), "default", false, nil)
+	return toolruntime.Call(name, json.RawMessage(arguments))
 }
 
 // StopLLMResponse cancels the current LLM request

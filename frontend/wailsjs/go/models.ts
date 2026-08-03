@@ -1,4 +1,4 @@
-export namespace mcp {
+export namespace toolruntime {
 	
 	export class Tool {
 	    name: string;

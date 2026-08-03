@@ -76,6 +76,126 @@ const cases = [
         ),
         expected: [],
     },
+    {
+        name: 'recovers a search tool routed as a shell command',
+        actual: () => harness.recoverAppToolRoutedAsCommand(
+            {
+                toolName: 'execute_command',
+                commandText: 'search_web M5 Pro GPU 코어 수',
+                toolArgs: '{"command":"search_web M5 Pro GPU 코어 수"}',
+            },
+            [{
+                name: 'search_web',
+                inputSchema: {
+                    properties: { query: { type: 'string' } },
+                    required: ['query'],
+                },
+            }],
+        ),
+        expected: {
+            toolName: 'search_web',
+            commandText: 'M5 Pro GPU 코어 수',
+            toolArgs: '{"query":"M5 Pro GPU 코어 수"}',
+            recovered: true,
+        },
+    },
+    {
+        name: 'keeps a real shell command unchanged',
+        actual: () => harness.recoverAppToolRoutedAsCommand(
+            {
+                toolName: 'execute_command',
+                commandText: 'uname -a',
+                toolArgs: '{"command":"uname -a"}',
+            },
+            [{
+                name: 'search_web',
+                inputSchema: {
+                    properties: { query: { type: 'string' } },
+                    required: ['query'],
+                },
+            }],
+        ),
+        expected: {
+            toolName: 'execute_command',
+            commandText: 'uname -a',
+            toolArgs: '{"command":"uname -a"}',
+            recovered: false,
+        },
+    },
+    {
+        name: 'recovers compact JSON app tool syntax routed as a shell command',
+        actual: () => harness.recoverAppToolRoutedAsCommand(
+            {
+                toolName: 'execute_command',
+                commandText: 'search_web{"query":"Apple M5 Pro GPU 코어 개수"}',
+                toolArgs: '{"command":"search_web{\\"query\\":\\"Apple M5 Pro GPU 코어 개수\\"}"}',
+            },
+            [{
+                name: 'search_web',
+                inputSchema: {
+                    properties: { query: { type: 'string' } },
+                    required: ['query'],
+                },
+            }],
+        ),
+        expected: {
+            toolName: 'search_web',
+            commandText: '{"query":"Apple M5 Pro GPU 코어 개수"}',
+            toolArgs: '{"query":"Apple M5 Pro GPU 코어 개수"}',
+            recovered: true,
+        },
+    },
+    {
+        name: 'recovers parenthesized JSON app tool syntax routed as a shell command',
+        actual: () => harness.recoverAppToolRoutedAsCommand(
+            {
+                toolName: 'execute_command',
+                commandText: 'search_web({"query":"GPU news"})',
+                toolArgs: '{"command":"search_web({\\"query\\":\\"GPU news\\"})"}',
+            },
+            [{
+                name: 'search_web',
+                inputSchema: {
+                    properties: { query: { type: 'string' } },
+                    required: ['query'],
+                },
+            }],
+        ),
+        expected: {
+            toolName: 'search_web',
+            commandText: '{"query":"GPU news"}',
+            toolArgs: '{"query":"GPU news"}',
+            recovered: true,
+        },
+    },
+    {
+        name: 'never sends an ambiguous app tool to the shell',
+        actual: () => Boolean(harness.recoverAppToolRoutedAsCommand(
+            {
+                toolName: 'execute_command',
+                commandText: 'multi_tool value',
+                toolArgs: '{"command":"multi_tool value"}',
+            },
+            [{
+                name: 'multi_tool',
+                inputSchema: {
+                    properties: { first: { type: 'string' }, second: { type: 'string' } },
+                    required: ['first', 'second'],
+                },
+            }],
+        ).error),
+        expected: true,
+    },
+    {
+        name: 'suppresses a repeated app tool call',
+        actual: () => harness.shouldSuppressDuplicateAppToolCall('search_web', 1),
+        expected: true,
+    },
+    {
+        name: 'keeps terminal repetition under terminal-specific recovery',
+        actual: () => harness.shouldSuppressDuplicateAppToolCall('execute_command', 1),
+        expected: false,
+    },
 ];
 
 let passed = 0;
