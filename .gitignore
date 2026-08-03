@@ -4,4 +4,3 @@ frontend/dist
 .DS_Store
 /.gocache
 frontend/package.json.md5
-frontend/package-lock.json

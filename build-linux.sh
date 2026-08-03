@@ -42,6 +42,7 @@ fi
 # Wails generates bindings, runs npm ci from wails.json, builds the frontend,
 # and packages the app in one dependency-checked build.
 echo "[INFO] Running wails build..."
+rm -f frontend/package.json.md5
 wails build -platform linux/amd64 -o "DKST Terminal AI"
 
 # Cleanup shim

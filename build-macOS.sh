@@ -39,6 +39,7 @@ rm -f "${APP_PATH}.lipo"
 # Run wails build (Universal for Mac M1/M2/M3 and Intel)
 # IMPORTANT: Use the name without .app to avoid directory/file collision during lipo
 echo "[INFO] Running wails build (darwin/universal)..."
+rm -f frontend/package.json.md5
 wails build -clean -platform darwin/universal -o "${APP_NAME}"
 
 if [ ! -d "${APP_PATH}" ]; then

@@ -21,6 +21,9 @@ if errorlevel 1 (
 
 rem Wails generates bindings, runs the locked npm ci install from wails.json,
 rem builds the frontend, and then packages the application exactly once.
+rem Never trust Wails' generated dependency cache from another machine.
+if exist "frontend\package.json.md5" del /f /q "frontend\package.json.md5"
+if errorlevel 1 goto :fail
 wails build -platform windows/amd64 -o "DKST Terminal AI.exe"
 
 if errorlevel 1 goto :fail
