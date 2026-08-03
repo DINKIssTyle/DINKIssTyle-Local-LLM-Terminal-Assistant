@@ -1,8 +1,9 @@
 # App-managed tool runtime
 
 DKST Terminal AI owns tool discovery, execution, approval, timeouts, and result
-delivery. LM Studio, OpenAI, Ollama, and custom providers are inference backends
-only and do not need an MCP registration for the app's tools.
+delivery. LM Studio, OpenAI-compatible providers, and the macOS on-device Apple
+Intelligence provider are inference backends only and do not need an MCP
+registration for the app's tools.
 
 ## Request flow
 

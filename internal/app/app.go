@@ -572,6 +572,8 @@ type App struct {
 	terminalCwds      map[string]string
 	activeTabId       string
 	lastCommandCursor map[string]int
+	appleIntelligence appleIntelligenceClient
+	skills            *skillRegistry
 	mu                sync.Mutex
 	cancelFunc        context.CancelFunc
 	llmRequestID      uint64
@@ -583,6 +585,8 @@ func NewApp() *App {
 		terminals:         make(map[string]*terminal.Terminal),
 		terminalCwds:      make(map[string]string),
 		lastCommandCursor: make(map[string]int),
+		appleIntelligence: newAppleIntelligenceClient(),
+		skills:            newSkillRegistry(builtinSkillFS),
 	}
 }
 
@@ -881,6 +885,27 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		a.mu.Unlock()
 		cancel()
 	}()
+
+	if provider == appleIntelligenceProvider {
+		if a.appleIntelligence == nil {
+			return "", fmt.Errorf("Apple Intelligence client is unavailable")
+		}
+		instructions, prompt := buildAppleIntelligencePrompt(messages)
+		if strings.TrimSpace(prompt) == "" {
+			return "", fmt.Errorf("Apple Intelligence prompt is empty")
+		}
+		emitLLMProgress(a.ctx, "prompt-processing", "Processing on device...", 0, true)
+		content, err := a.appleIntelligence.Generate(ctx, instructions, prompt)
+		emitLLMProgress(a.ctx, "", "", 100, false)
+		if err != nil {
+			log.Printf("[Apple Intelligence] Request failed: %v", err)
+			return "", err
+		}
+		if isStreaming {
+			runtime.EventsEmit(a.ctx, "llm:chunk", content)
+		}
+		return content, nil
+	}
 
 	url := normalizeAPIBaseURL(apiURL)
 	payload := map[string]interface{}{}

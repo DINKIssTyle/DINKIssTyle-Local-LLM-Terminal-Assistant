@@ -18,6 +18,10 @@ export function FetchLLMResponse(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
   return window['go']['app']['App']['FetchLLMResponse'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
 }
 
+export function GetAppleIntelligenceStatus() {
+  return window['go']['app']['App']['GetAppleIntelligenceStatus']();
+}
+
 export function GetRecentTerminalBuffer(arg1, arg2) {
   return window['go']['app']['App']['GetRecentTerminalBuffer'](arg1, arg2);
 }
@@ -34,8 +38,16 @@ export function GetTools() {
   return window['go']['app']['App']['GetTools']();
 }
 
+export function GetUserSkillsDirectory() {
+  return window['go']['app']['App']['GetUserSkillsDirectory']();
+}
+
 export function Greet(arg1) {
   return window['go']['app']['App']['Greet'](arg1);
+}
+
+export function InstallSystemIntegration() {
+  return window['go']['app']['App']['InstallSystemIntegration']();
 }
 
 export function LoadModel(arg1, arg2, arg3) {
@@ -46,12 +58,20 @@ export function OpenPermissionSettings() {
   return window['go']['app']['App']['OpenPermissionSettings']();
 }
 
+export function OpenUserSkillsDirectory() {
+  return window['go']['app']['App']['OpenUserSkillsDirectory']();
+}
+
 export function ReadActiveTerminalTail(arg1, arg2, arg3) {
   return window['go']['app']['App']['ReadActiveTerminalTail'](arg1, arg2, arg3);
 }
 
 export function ResizeTerminal(arg1, arg2, arg3) {
   return window['go']['app']['App']['ResizeTerminal'](arg1, arg2, arg3);
+}
+
+export function ResolveSkillContext(arg1, arg2) {
+  return window['go']['app']['App']['ResolveSkillContext'](arg1, arg2);
 }
 
 export function SetActiveTab(arg1) {
@@ -68,6 +88,10 @@ export function StopLLMResponse() {
 
 export function StopTerminal(arg1) {
   return window['go']['app']['App']['StopTerminal'](arg1);
+}
+
+export function UninstallSystemIntegration() {
+  return window['go']['app']['App']['UninstallSystemIntegration']();
 }
 
 export function UpdateToolRuntimeSettings(arg1) {

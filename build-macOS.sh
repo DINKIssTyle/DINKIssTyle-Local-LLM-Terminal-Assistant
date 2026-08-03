@@ -20,6 +20,27 @@ fi
 npm run build
 cd ..
 
+# Build the Foundation Models bridge as a universal helper. On SDKs that do
+# not provide FoundationModels, the helper still builds and reports that the
+# capability is unavailable at runtime.
+echo "[INFO] Building Apple Intelligence helper..."
+HELPER_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${HELPER_TMP_DIR}"' EXIT
+export CLANG_MODULE_CACHE_PATH="/tmp/dkst-terminal-clang-module-cache"
+export SWIFTPM_MODULECACHE_OVERRIDE="/tmp/dkst-terminal-swift-module-cache"
+xcrun swiftc -parse-as-library -O \
+    -target arm64-apple-macosx12.0 \
+    build/darwin/apple_intelligence_helper.swift \
+    -o "${HELPER_TMP_DIR}/DKSTAppleIntelligenceHelper-arm64"
+xcrun swiftc -parse-as-library -O \
+    -target x86_64-apple-macosx12.0 \
+    build/darwin/apple_intelligence_helper.swift \
+    -o "${HELPER_TMP_DIR}/DKSTAppleIntelligenceHelper-x86_64"
+lipo -create \
+    -output "${HELPER_TMP_DIR}/DKSTAppleIntelligenceHelper" \
+    "${HELPER_TMP_DIR}/DKSTAppleIntelligenceHelper-arm64" \
+    "${HELPER_TMP_DIR}/DKSTAppleIntelligenceHelper-x86_64"
+
 # Clear previous build artifacts to avoid lipo directory conflicts
 echo "[INFO] Cleaning old build artifacts..."
 rm -rf "${APP_PATH}"
@@ -36,6 +57,8 @@ if [ ! -d "${APP_PATH}" ]; then
     echo "[ERROR] Expected app bundle was not created: ${APP_PATH}"
     exit 1
 fi
+
+cp "${HELPER_TMP_DIR}/DKSTAppleIntelligenceHelper" "${APP_PATH}/Contents/MacOS/DKSTAppleIntelligenceHelper"
 
 # Sign the app (Ad-hoc if no identity is provided, otherwise use current identity)
 # Using entitlements helps macOS understand app capabilities and can reduce recurring TCC prompts.

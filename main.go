@@ -18,7 +18,15 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+//go:embed build/linux/icon.png
+var linuxIntegrationIcon []byte
+
+//go:embed skills/*/SKILL.md
+var builtinSkills embed.FS
+
 func main() {
+	app.SetLinuxIntegrationIcon(linuxIntegrationIcon)
+	app.SetBuiltinSkills(builtinSkills)
 	// Create an instance of the app structure
 	application := app.NewApp()
 

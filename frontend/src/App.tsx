@@ -28,7 +28,7 @@ import {
     shouldSuppressDuplicateAppToolCall,
     shouldUseComplexTaskMode,
 } from './prompt/harness';
-import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateToolRuntimeSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/app/App";
+import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateToolRuntimeSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings, GetAppleIntelligenceStatus, InstallSystemIntegration, UninstallSystemIntegration, ResolveSkillContext, GetUserSkillsDirectory, OpenUserSkillsDirectory } from "../wailsjs/go/app/App";
 import { EventsOn, EventsEmit, WindowFullscreen, WindowIsFullscreen, WindowUnfullscreen } from "../wailsjs/runtime/runtime";
 
 function escapeHtml(text: string): string {
@@ -1632,6 +1632,29 @@ const ReasoningBox = ({ content, isThinking, durationMs }: { content: string, is
     );
 };
 
+type AppleIntelligenceStatusInfo = {
+    available: boolean;
+    state: string;
+    detail?: string;
+};
+
+function appleIntelligenceStatusLabel(
+    status: AppleIntelligenceStatusInfo,
+    t: (key: Parameters<typeof getTranslation>[1]) => string,
+): string {
+    switch (status.state) {
+        case 'available': return t('appleIntelligenceAvailable');
+        case 'checking': return t('appleIntelligenceChecking');
+        case 'device_not_eligible': return t('appleIntelligenceDeviceNotEligible');
+        case 'not_enabled': return t('appleIntelligenceNotEnabled');
+        case 'model_not_ready': return t('appleIntelligenceModelNotReady');
+        case 'os_unsupported': return t('appleIntelligenceOSUnsupported');
+        case 'sdk_unavailable': return t('appleIntelligenceSDKUnavailable');
+        case 'helper_unavailable': return t('appleIntelligenceHelperUnavailable');
+        default: return t('appleIntelligenceUnavailable');
+    }
+}
+
 function App() {
     const tabListRef = useRef<HTMLDivElement | null>(null);
     const tabDragStateRef = useRef<TabDragState | null>(null);
@@ -1648,6 +1671,14 @@ function App() {
     const [activeTabId, setActiveTabId] = useState('1');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [runtimePlatform, setRuntimePlatform] = useState('unknown');
+    const [appleIntelligenceStatus, setAppleIntelligenceStatus] = useState<AppleIntelligenceStatusInfo>({
+        available: false,
+        state: 'checking',
+    });
+    const [integrationBusy, setIntegrationBusy] = useState(false);
+    const [integrationMessage, setIntegrationMessage] = useState('');
+    const [integrationError, setIntegrationError] = useState(false);
+    const [userSkillsDirectory, setUserSkillsDirectory] = useState('');
 
     // Settings with persistence
     const [language, setLanguage] = useState<Language>(() => (localStorage.getItem('language') as Language) || 'ko');
@@ -1657,7 +1688,10 @@ function App() {
     const [maxTokens, setMaxTokens] = useState(() => Number(localStorage.getItem('maxTokens')) || 10000);
     const [temperature, setTemperature] = useState(() => Number(localStorage.getItem('temperature')) || 0.7);
     const [toolTemperature, setToolTemperature] = useState(() => Number(localStorage.getItem('toolTemperature')) || 0.1);
-    const [provider, setProvider] = useState(() => localStorage.getItem('provider') || 'LM Studio');
+    const [provider, setProvider] = useState(() => {
+        const savedProvider = localStorage.getItem('provider') || 'LM Studio';
+        return savedProvider === 'Ollama' || savedProvider === 'Custom' ? 'OpenAI' : savedProvider;
+    });
     const [globalUserPrompt, setGlobalUserPrompt] = useState(() => localStorage.getItem('globalUserPrompt') || '');
 
     // Terminal Settings with persistence
@@ -1761,6 +1795,12 @@ function App() {
     }, []);
 
     useEffect(() => {
+        GetUserSkillsDirectory()
+            .then(setUserSkillsDirectory)
+            .catch((error: unknown) => console.error('Failed to resolve user skills directory:', error));
+    }, []);
+
+    useEffect(() => {
         SetActiveTab(activeTabId);
     }, [activeTabId]);
 
@@ -1769,12 +1809,67 @@ function App() {
     const t = (key: Parameters<typeof getTranslation>[1]) => getTranslation(language, key);
     const permissionHint = getPermissionHint(runtimePlatform, t);
 
+    const refreshAppleIntelligenceStatus = async () => {
+        setAppleIntelligenceStatus({ available: false, state: 'checking' });
+        try {
+            const status = await GetAppleIntelligenceStatus();
+            setAppleIntelligenceStatus({
+                available: Boolean(status.available),
+                state: status.state || 'unavailable',
+                detail: status.detail,
+            });
+        } catch (error) {
+            setAppleIntelligenceStatus({
+                available: false,
+                state: 'unavailable',
+                detail: String(error),
+            });
+        }
+    };
+
+    const runSystemIntegration = async (action: () => Promise<string>) => {
+        setIntegrationBusy(true);
+        setIntegrationMessage(t('integrationWorking'));
+        setIntegrationError(false);
+        try {
+            const result = await action();
+            setIntegrationMessage(result === 'installed'
+                ? t('integrationInstalled')
+                : result === 'uninstalled'
+                    ? t('integrationUninstalled')
+                    : result);
+        } catch (error) {
+            setIntegrationError(true);
+            setIntegrationMessage(String(error));
+        } finally {
+            setIntegrationBusy(false);
+        }
+    };
+
+    useEffect(() => {
+        if (runtimePlatform === 'darwin' && provider === 'Apple Intelligence' && isSettingsOpen) {
+            void refreshAppleIntelligenceStatus();
+        }
+        if (runtimePlatform !== 'unknown' && runtimePlatform !== 'darwin' && provider === 'Apple Intelligence') {
+            setProvider('LM Studio');
+        }
+    }, [runtimePlatform, provider, isSettingsOpen]);
+
     const handleOpenPermissionSettings = async () => {
         try {
             await OpenPermissionSettings();
         } catch (error) {
             console.error('Failed to open permission settings:', error);
             alert(t('permissionsManualHint'));
+        }
+    };
+
+    const handleOpenUserSkillsDirectory = async () => {
+        try {
+            await OpenUserSkillsDirectory();
+        } catch (error) {
+            console.error('Failed to open user skills directory:', error);
+            alert(String(error));
         }
     };
 
@@ -3565,6 +3660,11 @@ ${t('greeting')}`
             console.log(`[LLM] Model: ${modelName}, Provider: ${provider}`);
             const complexRequest = shouldUseComplexTaskMode(trimmedInput);
             const currentWorkingDirectory = getKnownTerminalCwd(activeTabId) || '(unknown)';
+            const skillContext = await ResolveSkillContext(
+                trimmedInput,
+                provider === 'Apple Intelligence' ? 3000 : 6000,
+            );
+            if (!isCurrentRequest()) return;
             const baseSystemPrompt = buildBaseSystemPrompt({
                 assistantName: 'DKST Terminal AI',
                 currentOS: window.navigator.platform,
@@ -3573,6 +3673,7 @@ ${t('greeting')}`
                 complexRequest,
                 availableTools: activeTools,
                 globalUserPrompt,
+                skillContext,
             });
             const localSystemEvidenceRequired = requiresLocalSystemEvidence(trimmedInput);
 
@@ -4451,50 +4552,58 @@ ${t('chatCleared')}`
                                             </select>
                                         </div>
                                         <div className="settings-field">
-                                            <label>{t('serverUrl')}</label>
-                                            <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="127.0.0.1:1234" {...textAssistOffProps} />
-                                            <span className="settings-hint">{t('urlHint')}</span>
-                                        </div>
-                                        <div className="settings-field">
-                                            <label>{t('modelKey')}</label>
-                                            <div className="model-selection-group">
-                                                {provider === 'LM Studio' && availableModels.length > 0 ? (
-                                                    <select
-                                                        value={modelName}
-                                                        onChange={e => setModelName(e.target.value)}
-                                                        className="model-select"
-                                                    >
-                                                        {availableModels.map(m => (
-                                                            <option key={m} value={m}>{m}</option>
-                                                        ))}
-                                                    </select>
-                                                ) : (
-                                                    <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} {...textAssistOffProps} />
-                                                )}
-                                                {provider === 'LM Studio' && (
-                                                    <button
-                                                        className="refresh-models-btn"
-                                                        onClick={handleFetchModels}
-                                                        disabled={isFetchingModels}
-                                                        title={t('fetchModels')}
-                                                    >
-                                                        {isFetchingModels ? '...' : t('fetchModels')}
-                                                    </button>
-                                                )}
-                                            </div>
-                                            <span className="settings-hint">{t('modelHint')}</span>
-                                        </div>
-                                        <div className="settings-field">
                                             <label>{t('llmProvider')}</label>
                                             <select value={provider} onChange={e => setProvider(e.target.value)}>
-                                                <option>LM Studio</option><option>OpenAI</option><option>Ollama</option><option>Custom</option>
+                                                <option value="LM Studio">LM Studio</option>
+                                                <option value="OpenAI">{t('openAICompatible')}</option>
+                                                {runtimePlatform === 'darwin' && <option>Apple Intelligence</option>}
                                             </select>
                                             <span className="settings-hint">{t('providerHint')}</span>
                                         </div>
-                                        <div className="settings-field">
-                                            <label>{provider === 'LM Studio' || provider === 'Ollama' ? t('apiKey') : t('apiKeyRequired')}</label>
-                                            <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="OpenAI or Local key" {...textAssistOffProps} />
-                                        </div>
+                                        {provider === 'Apple Intelligence' ? (
+                                            <div className={`settings-field full apple-intelligence-status-card ${appleIntelligenceStatus.available ? 'available' : ''}`}>
+                                                <div className="apple-intelligence-copy">
+                                                    <strong>{t('appleIntelligenceOnDevice')}</strong>
+                                                    <span>{t('appleIntelligenceDescription')}</span>
+                                                    <span className="apple-intelligence-state" title={appleIntelligenceStatus.detail || undefined}>
+                                                        {appleIntelligenceStatusLabel(appleIntelligenceStatus, t)}
+                                                    </span>
+                                                </div>
+                                                <button type="button" className="mini-reset-btn" onClick={refreshAppleIntelligenceStatus}>
+                                                    {t('refreshStatus')}
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <div className="settings-field">
+                                                    <label>{t('serverUrl')}</label>
+                                                    <input type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="127.0.0.1:1234" {...textAssistOffProps} />
+                                                    <span className="settings-hint">{t('urlHint')}</span>
+                                                </div>
+                                                <div className="settings-field">
+                                                    <label>{t('modelKey')}</label>
+                                                    <div className="model-selection-group">
+                                                        {provider === 'LM Studio' && availableModels.length > 0 ? (
+                                                            <select value={modelName} onChange={e => setModelName(e.target.value)} className="model-select">
+                                                                {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                                                            </select>
+                                                        ) : (
+                                                            <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} {...textAssistOffProps} />
+                                                        )}
+                                                        {provider === 'LM Studio' && (
+                                                            <button className="refresh-models-btn" onClick={handleFetchModels} disabled={isFetchingModels} title={t('fetchModels')}>
+                                                                {isFetchingModels ? '...' : t('fetchModels')}
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                    <span className="settings-hint">{t('modelHint')}</span>
+                                                </div>
+                                                <div className="settings-field">
+                                                    <label>{provider === 'LM Studio' || provider === 'Ollama' ? t('apiKey') : t('apiKeyRequired')}</label>
+                                                    <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="OpenAI or Local key" {...textAssistOffProps} />
+                                                </div>
+                                            </>
+                                        )}
                                         <div className="settings-field">
                                             <label>{t('maxTokens')}</label>
                                             <input
@@ -4554,6 +4663,28 @@ ${t('chatCleared')}`
                                     </div>
                                 </div>
                                 <div className="settings-section">
+                                    <h4>{t('skills')}</h4>
+                                    <div className="settings-grid">
+                                        <div className="settings-field full">
+                                            <div className="permission-card skills-folder-card">
+                                                <div className="permission-copy">
+                                                    <strong>{t('skillsUserFolder')}</strong>
+                                                    <span className="settings-hint">{t('skillsDescription')}</span>
+                                                    <code className="skills-folder-path">{userSkillsDirectory || t('skillsPathLoading')}</code>
+                                                </div>
+                                                <button
+                                                    className="mini-reset-btn permission-btn"
+                                                    type="button"
+                                                    onClick={handleOpenUserSkillsDirectory}
+                                                    disabled={!userSkillsDirectory}
+                                                >
+                                                    {t('skillsOpenFolder')}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="settings-section">
                                     <h4>{t('permissions')}</h4>
                                     <div className="settings-grid">
                                         <div className="settings-field full permission-field">
@@ -4606,6 +4737,39 @@ ${t('chatCleared')}`
                                         </div>
                                     </div>
                                 </div>
+                                {runtimePlatform === 'linux' && (
+                                    <div className="settings-section">
+                                        <h4>{t('linuxIntegration')}</h4>
+                                        <div className="system-integration-card">
+                                            <div className="system-integration-copy">
+                                                <span>{t('linuxIntegrationDescription')}</span>
+                                                {integrationMessage && (
+                                                    <span className={`system-integration-message ${integrationError ? 'is-error' : ''}`}>
+                                                        {integrationMessage}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="system-integration-actions">
+                                                <button
+                                                    type="button"
+                                                    className="mini-reset-btn integration-install-btn"
+                                                    disabled={integrationBusy}
+                                                    onClick={() => runSystemIntegration(InstallSystemIntegration)}
+                                                >
+                                                    {t('install')}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="mini-reset-btn integration-uninstall-btn"
+                                                    disabled={integrationBusy}
+                                                    onClick={() => runSystemIntegration(UninstallSystemIntegration)}
+                                                >
+                                                    {t('uninstall')}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
                                 <div className="settings-section">
                                     <h4>Debug</h4>
                                     <div className="settings-grid">

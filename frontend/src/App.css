@@ -1397,6 +1397,85 @@ body.tab-drag-active * {
     flex: 0 0 auto;
 }
 
+.skills-folder-path {
+    display: block;
+    max-width: 100%;
+    padding: 7px 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.22);
+    color: #8fc6ff;
+    font-size: 10px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+.apple-intelligence-status-card,
+.system-integration-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.apple-intelligence-status-card.available .apple-intelligence-state {
+    color: #65d69a;
+}
+
+.apple-intelligence-copy,
+.system-integration-copy {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.apple-intelligence-copy {
+    width: 100%;
+}
+
+.apple-intelligence-copy strong {
+    color: var(--text-color);
+    font-size: 13px;
+}
+
+.apple-intelligence-state {
+    color: #f0bb63;
+    font-weight: 700;
+}
+
+.system-integration-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 8px;
+}
+
+.system-integration-actions .mini-reset-btn {
+    height: 34px;
+}
+
+.integration-install-btn {
+    color: #65d69a;
+}
+
+.integration-uninstall-btn,
+.system-integration-message.is-error {
+    color: #ff8585;
+}
+
+.system-integration-message {
+    color: #78b7ff;
+    word-break: break-word;
+}
+
 .tool-toggle-list {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

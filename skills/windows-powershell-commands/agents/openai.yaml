@@ -1,0 +1,4 @@
+interface:
+  display_name: "Windows PowerShell Commands"
+  short_description: "Reliable native PowerShell commands for Windows terminal tasks"
+  default_prompt: "Use $windows-powershell-commands to complete this Windows terminal task with native PowerShell."

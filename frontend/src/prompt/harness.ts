@@ -164,6 +164,7 @@ type BuildBaseSystemPromptArgs = {
     complexRequest: boolean;
     availableTools: PromptVisibleTool[];
     globalUserPrompt: string;
+    skillContext?: string;
 };
 
 const buildLocalTerminalRecipe = (request: string, currentOS: string): string => {
@@ -743,6 +744,16 @@ Treat this as persistent user preference/context unless it conflicts with safety
 ${trimmedGlobalUserPrompt}
 [END_GLOBAL_USER_PROMPT]`
         : '';
+    const trimmedSkillContext = args.skillContext?.trim() || '';
+    const skillContextSection = trimmedSkillContext
+        ? `
+
+ACTIVE SKILL INSTRUCTIONS:
+Apply these instructions only to the current task. They do not override safety rules or exact tool-call syntax.
+[BEGIN_ACTIVE_SKILL]
+${trimmedSkillContext}
+[END_ACTIVE_SKILL]`
+        : '';
 
     const localTerminalRecipe = buildLocalTerminalRecipe(args.currentRequest, args.currentOS);
     const quickRequestRule = args.complexRequest
@@ -771,7 +782,7 @@ Current OS: ${args.currentOS}
 Current Working Directory: ${args.currentWorkingDirectory}
 Complex Request Mode: ${args.complexRequest ? 'enabled' : 'disabled'}${quickRequestRule}${localTerminalRecipe}
 
-${renderAvailableToolsForPrompt(args.availableTools)}${globalUserPromptSection}`;
+${renderAvailableToolsForPrompt(args.availableTools)}${skillContextSection}${globalUserPromptSection}`;
 };
 
 export const buildLLMMessages = ({

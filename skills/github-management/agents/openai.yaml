@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Management"
+  short_description: "Synchronize Git history and manage GitHub repositories"
+  default_prompt: "Use $github-management to synchronize this Git repository and verify the GitHub result safely."

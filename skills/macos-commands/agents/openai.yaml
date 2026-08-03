@@ -1,0 +1,4 @@
+interface:
+  display_name: "macOS Commands"
+  short_description: "Reliable native commands for common macOS terminal tasks"
+  default_prompt: "Use $macos-commands to complete this macOS terminal task with native commands."

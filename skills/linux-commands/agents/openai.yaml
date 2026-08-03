@@ -1,0 +1,4 @@
+interface:
+  display_name: "Linux Commands"
+  short_description: "Reliable native commands for common Linux terminal tasks"
+  default_prompt: "Use $linux-commands to complete this Linux terminal task with native commands."
