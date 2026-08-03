@@ -50,10 +50,29 @@ type ToolHostFuncs struct {
 	ReadTerminalTailFunc func(lines int, maxWaitMs int, idleMs int) (string, error)
 }
 
+type timedToolCacheEntry struct {
+	Value    string
+	StoredAt time.Time
+}
+
+var (
+	searchCacheMu sync.Mutex
+	searchCache   = make(map[string]timedToolCacheEntry)
+	pageCacheMu   sync.Mutex
+	pageCache     = make(map[string]timedToolCacheEntry)
+)
+
+const (
+	searchCacheTTL           = 10 * time.Minute
+	pageCacheTTL             = 30 * time.Minute
+	maxTimedToolCacheEntries = 64
+)
+
 type ToolHooks struct {
 	Trace                   func(source, stage, message string, details map[string]interface{})
 	SearchMemory            func(userID, query string) (string, error)
 	ReadMemory              func(userID string, memoryID int64) (string, error)
+	ReadMemoryContext       func(userID string, memoryID int64, chunkIndex int) (string, error)
 	DeleteMemory            func(userID string, memoryID int64) (string, error)
 	BufferWebResult         func(userID, toolName, query, pageURL, title, content string) (string, error)
 	BufferWebFallback       func(userID, failedTool, target string, err error) string
@@ -163,7 +182,7 @@ func GetToolList() []Tool {
 	tools := []Tool{
 		{
 			Name:        "search_web",
-			Description: "Search the internet for current information. This tool tries Google first and automatically falls back to DuckDuckGo Lite if needed.",
+			Description: "Search the internet for current information using DuckDuckGo.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -174,7 +193,7 @@ func GetToolList() []Tool {
 		},
 		{
 			Name:        "read_web_page",
-			Description: "Fetch and buffer the text content of a specific URL for the current user. This returns a source handle plus summary, not the full page. After this tool, use read_buffered_source with the source_id and the user's question to inspect relevant excerpts.",
+			Description: "Fetch and buffer the text content of a specific high-value URL for the current user. Use this only when search snippets are not enough or the user needs source-specific detail. This returns a source handle plus summary, not the full page; answer from that summary unless focused excerpts are clearly needed.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -185,11 +204,11 @@ func GetToolList() []Tool {
 		},
 		{
 			Name:        "read_buffered_source",
-			Description: "Read relevant excerpts from a previously buffered web source for the current user. Prefer this after read_web_page, naver_search, namu_wiki, or a buffered search result. If source_id is omitted, the most recent buffered source for this user is used.",
+			Description: "Read focused excerpts from buffered web sources for the current user. Use this for long pages when the buffered summary is insufficient. If source_id is omitted, the most recent buffered source is used.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"source_id":  map[string]interface{}{"type": "string", "description": "Buffered source ID returned by another web tool. Optional if you want the latest source."},
+					"source_id":  map[string]interface{}{"type": "string", "description": "Buffered source ID returned by another web tool. Optional; omit to use the latest source."},
 					"query":      map[string]interface{}{"type": "string", "description": "Focused question or keywords to retrieve the most relevant excerpts."},
 					"max_chunks": map[string]interface{}{"type": "integer", "description": "Maximum number of excerpts to return. Optional."},
 				},
@@ -428,7 +447,7 @@ func defaultReadPageTimeoutForURL(pageURL string) time.Duration {
 	if hooks.ReadPageTimeoutForURL != nil {
 		return hooks.ReadPageTimeoutForURL(pageURL)
 	}
-	return defaultReadPageTimeoutForURL(pageURL)
+	return readPageTimeoutForToolURL(pageURL)
 }
 
 func defaultChallengeWaitIterations(timeout time.Duration) int {
@@ -436,7 +455,7 @@ func defaultChallengeWaitIterations(timeout time.Duration) int {
 	if hooks.ChallengeWaitIterations != nil {
 		return hooks.ChallengeWaitIterations(timeout)
 	}
-	return defaultChallengeWaitIterations(timeout)
+	return challengeWaitIterationsForTool(timeout)
 }
 
 func ExecuteToolByName(toolName string, argumentsJSON []byte, userID string, enableMemory bool, disabledTools []string) (string, error) {
@@ -700,6 +719,12 @@ func SearchWeb(query string) (string, error) {
 	if query != originalQuery {
 		traceArgs = append(traceArgs, "original_query", originalQuery)
 	}
+	cacheKey := strings.ToLower(strings.Join(strings.Fields(query), " "))
+	cacheTTL := searchCacheTTLForQuery(query)
+	if cached, ok := getTimedToolCache(searchCache, &searchCacheMu, cacheKey, cacheTTL); ok {
+		emitTraceEvent("mcp", "search_web.cache_hit", "Using cached web search result", traceDetailsMap("query", query, "elapsed_ms", toolDurationMs(start), "provider", "duckduckgo"))
+		return cached, nil
+	}
 	emitTraceEvent("mcp", "search_web.start", "Starting web search", traceDetailsMap(traceArgs...))
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -714,7 +739,73 @@ func SearchWeb(query string) (string, error) {
 	}
 
 	emitTraceEvent("mcp", "search_web.complete", "DuckDuckGo search completed", traceDetailsMap("query", query, "elapsed_ms", toolDurationMs(start), "results", len(results), "provider", "duckduckgo"))
-	return strings.Join(results, "\n---\n"), nil
+	formatted := strings.Join(results, "\n---\n")
+	setTimedToolCache(searchCache, &searchCacheMu, cacheKey, formatted, cacheTTL)
+	return formatted, nil
+}
+
+func getTimedToolCache(cache map[string]timedToolCacheEntry, mu *sync.Mutex, key string, ttl time.Duration) (string, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", false
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	entry, ok := cache[key]
+	if !ok {
+		return "", false
+	}
+	if time.Since(entry.StoredAt) > ttl {
+		delete(cache, key)
+		return "", false
+	}
+	return entry.Value, true
+}
+
+func setTimedToolCache(cache map[string]timedToolCacheEntry, mu *sync.Mutex, key, value string, ttl ...time.Duration) {
+	key = strings.TrimSpace(key)
+	if key == "" || strings.TrimSpace(value) == "" {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	entryTTL := searchCacheTTL
+	if len(ttl) > 0 && ttl[0] > 0 {
+		entryTTL = ttl[0]
+	}
+	for existingKey, entry := range cache {
+		if time.Since(entry.StoredAt) > entryTTL {
+			delete(cache, existingKey)
+		}
+	}
+	for len(cache) >= maxTimedToolCacheEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for existingKey, entry := range cache {
+			if oldestKey == "" || entry.StoredAt.Before(oldestTime) {
+				oldestKey, oldestTime = existingKey, entry.StoredAt
+			}
+		}
+		delete(cache, oldestKey)
+	}
+	cache[key] = timedToolCacheEntry{Value: value, StoredAt: time.Now()}
+}
+
+func searchCacheTTLForQuery(query string) time.Duration {
+	lower := strings.ToLower(query)
+	volatile := []string{"오늘", "현재", "실시간", "속보", "날씨", "주가", "환율", "경기 결과", "today", "current", "latest", "breaking", "weather", "stock price", "exchange rate", "score"}
+	for _, signal := range volatile {
+		if strings.Contains(lower, signal) {
+			return time.Minute
+		}
+	}
+	stable := []string{"공식 문서", "사용법", "문서", "documentation", "reference", "how to"}
+	for _, signal := range stable {
+		if strings.Contains(lower, signal) {
+			return 30 * time.Minute
+		}
+	}
+	return searchCacheTTL
 }
 
 func searchDuckDuckGo(query string, client *http.Client) ([]string, error) {
@@ -829,6 +920,11 @@ func ReadPage(pageURL string) (string, error) {
 	log.Printf("[MCP] Reading Page (Advanced + Anti-Detection): %s", pageURL)
 	start := time.Now()
 	emitTraceEvent("mcp", "read_web_page.start", "Starting page read", traceDetailsMap("url", pageURL))
+	cacheKey := strings.TrimSpace(pageURL)
+	if cached, ok := getTimedToolCache(pageCache, &pageCacheMu, cacheKey, pageCacheTTL); ok {
+		emitTraceEvent("mcp", "read_web_page.cache_hit", "Using cached page read result", traceDetailsMap("url", pageURL, "elapsed_ms", toolDurationMs(start), "chars", len(cached)))
+		return cached, nil
+	}
 
 	// 1. Anti-Detection: Configure browser with stealth flags
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
@@ -847,7 +943,7 @@ func ReadPage(pageURL string) (string, error) {
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	timeout := readPageTimeoutForToolURL(pageURL)
+	timeout := defaultReadPageTimeoutForURL(pageURL)
 	ctx, cancel = context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -869,7 +965,7 @@ func ReadPage(pageURL string) (string, error) {
 
 		// 3. Anti-Detection: Wait briefly for challenge pages, but keep the total budget bounded.
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			maxChallengeWait := challengeWaitIterationsForTool(timeout)
+			maxChallengeWait := defaultChallengeWaitIterations(timeout)
 			for i := 0; i < maxChallengeWait; i++ {
 				var title string
 				if err := chromedp.Evaluate(`document.title`, &title).Do(ctx); err != nil {
@@ -985,6 +1081,7 @@ func ReadPage(pageURL string) (string, error) {
 	if len(res) > 30000 {
 		res = res[:30000] + "... (truncated)"
 	}
+	setTimedToolCache(pageCache, &pageCacheMu, cacheKey, res, pageCacheTTL)
 
 	emitTraceEvent("mcp", "read_web_page.complete", "Page read completed", traceDetailsMap("url", pageURL, "elapsed_ms", toolDurationMs(start), "chars", len(res)))
 	return res, nil

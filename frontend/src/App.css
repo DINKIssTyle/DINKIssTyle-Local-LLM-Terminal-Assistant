@@ -1,3 +1,11 @@
+@font-face {
+    font-family: "Material Symbols Outlined";
+    font-style: normal;
+    font-weight: 400;
+    font-display: block;
+    src: url("./assets/fonts/material-symbols-outlined.woff2") format("woff2");
+}
+
 :root {
     --bg-color: #0b0f14;
     --panel-color: #0f141b;
@@ -30,6 +38,25 @@ body,
 
 * {
     box-sizing: border-box;
+}
+
+.material-symbols-outlined {
+    display: inline-block;
+    flex: 0 0 auto;
+    overflow: hidden;
+    font-family: "Material Symbols Outlined";
+    font-size: 20px;
+    font-style: normal;
+    font-weight: normal;
+    font-feature-settings: "liga";
+    -webkit-font-feature-settings: "liga";
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: normal;
+    line-height: 1;
+    text-transform: none;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
 }
 
 .no-select {
@@ -255,13 +282,22 @@ select {
     background: rgba(255, 255, 255, 0.06);
 }
 
+.icon-btn .material-symbols-outlined,
+.add-tab-btn .material-symbols-outlined,
+.send-btn .material-symbols-outlined,
+.stop-btn .material-symbols-outlined {
+    font-size: 20px;
+}
+
 .tab-list {
     display: flex;
+    flex: 1 1 auto;
     align-items: center;
     gap: 8px;
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
+    scroll-behavior: smooth;
 }
 
 .tab-list::-webkit-scrollbar {
@@ -269,6 +305,7 @@ select {
 }
 
 .tab-item {
+    flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -281,6 +318,7 @@ select {
     font-weight: 700;
     cursor: pointer;
     white-space: nowrap;
+    touch-action: none;
 }
 
 .tab-item.active {
@@ -290,8 +328,66 @@ select {
 }
 
 .close-tab {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
     color: inherit;
     opacity: 0.72;
+    cursor: pointer;
+}
+
+.close-tab:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.close-tab .material-symbols-outlined {
+    font-size: 16px;
+}
+
+.tab-item.dragging {
+    position: fixed;
+    z-index: 9999;
+    pointer-events: none;
+    margin: 0;
+    cursor: grabbing;
+    color: var(--accent-color);
+    border-color: rgba(88, 166, 255, 0.48);
+    background: #192230;
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(88, 166, 255, 0.12);
+    transition: none;
+}
+
+.tab-drag-placeholder {
+    flex: 0 0 auto;
+    border: 1px dashed rgba(88, 166, 255, 0.62);
+    border-radius: 12px;
+    background: rgba(88, 166, 255, 0.08);
+}
+
+body.tab-drag-active,
+body.tab-drag-active * {
+    cursor: grabbing !important;
+}
+
+.reasoning-toggle-icon {
+    font-size: 16px;
+}
+
+.message-label-icon {
+    font-size: 15px;
+}
+
+.markdown-material-icon {
+    margin-right: 0.2em;
+    font-size: 1em;
+    vertical-align: -0.12em;
 }
 
 .chat-content {
@@ -1051,6 +1147,9 @@ select {
     background: transparent;
     color: var(--text-muted);
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .close-icon-btn:hover {
@@ -1111,6 +1210,10 @@ select {
     border-color: rgba(88, 166, 255, 0.42);
     background: rgba(88, 166, 255, 0.14);
     color: #d7ecff;
+}
+
+.settings-help-btn .material-symbols-outlined {
+    font-size: 16px;
 }
 
 .settings-grid {

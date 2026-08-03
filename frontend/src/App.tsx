@@ -15,8 +15,16 @@ import {
     buildCompactVisibleChat,
     buildLLMMessages,
     clampPromptTextFromEnd,
+    getMissingRequestedLocalFacts,
+    getMissingRequiredTerminalActions,
     getPromptVisibleTools,
+    recoverTrailingJsonToolCall,
+    requiresLocalSystemEvidence,
+    shouldContinueAfterDelegatedAction,
     shouldAttachScreenContext,
+    shouldRedirectWebToolToLocalSystem,
+    shouldRetryAfterTerminalAssessment,
+    shouldRejectUnexpectedDirectoryChange,
     shouldUseComplexTaskMode,
 } from './prompt/harness';
 import { StartTerminal, WriteToTerminal, ResizeTerminal, FetchLLMResponse, CallTool, GetTools, GetRecentTerminalBuffer, GetTerminalCwd, ClearTerminalContext, StopTerminal, SetActiveTab, UpdateMCPSettings, StopLLMResponse, GetRuntimePlatform, OpenPermissionSettings } from "../wailsjs/go/app/App";
@@ -33,6 +41,7 @@ function escapeHtml(text: string): string {
 
 function renderInlineMarkdown(text: string): string {
     let html = escapeHtml(text);
+    html = html.replace(/:material-([a-z0-9_]+):/g, '<span class="material-symbols-outlined markdown-material-icon" aria-hidden="true">$1</span>');
     html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
     html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
     html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
@@ -288,6 +297,31 @@ function safeJsonStringify(value: unknown): string {
     } catch {
         return String(value);
     }
+}
+
+function parsedToolTimeoutArg(toolArgs: string, key: string): number {
+    try {
+        const parsed = toolArgs.trim() ? JSON.parse(toolArgs) : {};
+        const value = Number(parsed?.[key]);
+        return Number.isFinite(value) && value > 0 ? value : 0;
+    } catch {
+        return 0;
+    }
+}
+
+function getPromptMetrics(messages: Array<{ content?: string }>): { chars: number; estimatedTokens: number } {
+    let asciiChars = 0;
+    let nonAsciiChars = 0;
+    for (const message of messages) {
+        for (const char of message.content || '') {
+            if (char.charCodeAt(0) <= 0x7f) asciiChars += 1;
+            else nonAsciiChars += 1;
+        }
+    }
+    return {
+        chars: asciiChars + nonAsciiChars,
+        estimatedTokens: Math.ceil(asciiChars / 4 + nonAsciiChars),
+    };
 }
 
 function maskSensitiveText(value: string, apiKey: string): string {
@@ -602,6 +636,18 @@ interface Tab {
     name: string;
 }
 
+interface TabDragState {
+    tabId: string;
+    pointerId: number;
+    startX: number;
+    offsetX: number;
+    railTop: number;
+    insertionIndex: number;
+    activated: boolean;
+    sourceNode: HTMLDivElement;
+    placeholderNode: HTMLDivElement | null;
+}
+
 type DebugPanelTab = 'context' | 'request' | 'response' | 'tools' | 'terminal';
 
 type DebugToolExecution = {
@@ -707,7 +753,9 @@ type PendingTerminalCommandObservation = {
 
 const TERMINAL_CONTEXT_CHAR_LIMIT = 4000;
 const INTERNAL_ONLY_TOOL_NAMES = new Set(['read_terminal_tail']);
-const DEFAULT_ENABLED_TOOLS = ['search_web', 'read_web_page', 'get_current_time', 'execute_command', 'send_keys', 'naver_search', 'namu_wiki'];
+const DEFAULT_ENABLED_TOOLS = ['search_web', 'read_web_page', 'read_buffered_source', 'get_current_time', 'execute_command', 'send_keys', 'naver_search', 'namu_wiki'];
+const TOOL_FOLLOW_UP_MAX_TOKENS = 4096;
+const TERMINAL_SUMMARY_MAX_TOKENS = 2048;
 
 type LLMProgressState = {
     phase: 'model-load' | 'prompt-processing';
@@ -851,6 +899,29 @@ const normalizeExecuteCommandPayload = (payload: Record<string, unknown> | null,
 
     if (rawPayload) {
         const normalized = normalizeWrappedString(rawPayload);
+        if (normalized.startsWith('{')) {
+            const repairedCandidates = [
+                normalized.endsWith('}') ? normalized : `${normalized}}`,
+                normalized.endsWith('"') ? `${normalized}}` : `${normalized}"}`,
+            ];
+            for (const candidate of repairedCandidates) {
+                try {
+                    const repairedPayload = JSON.parse(candidate);
+                    if (repairedPayload && typeof repairedPayload === 'object' && !Array.isArray(repairedPayload)) {
+                        const command = getFirstStringField(repairedPayload as Record<string, unknown>, ['command', 'cmd', 'arg', 'args', 'text', 'value', 'input', 'shell_command', 'shell']);
+                        if (command) {
+                            return {
+                                commandText: command,
+                                toolArgs: JSON.stringify({ command }),
+                            };
+                        }
+                    }
+                } catch {
+                    // Try the next conservative repair. Never execute raw JSON text.
+                }
+            }
+            return null;
+        }
         if (normalized && !normalized.startsWith('{')) {
             return {
                 commandText: normalized,
@@ -933,6 +1004,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
     const bracketSendKeysRegex = /\[SEND_KEYS:\s*(\[[\s\S]*?\])\s*\]/i;
     const bracketToolRegex = /\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*({[\s\S]*?})\s*\]/i;
     const bracketToolNoArgsRegex = /\[TOOL:\s*([a-zA-Z0-9_:-]+)\s*\]/i;
+    const STRUCTURAL_TAGS = new Set(['analysis', 'progress', 'tasklist', 'execution_plan', 'walkthrough', 'report', 'execution', 'artifact', 'reasoning', 'thought', 'thinking', 'reflection']);
 
     // Bare fallback patterns: no >>> <<< or [] delimiters
     const bareExecuteRegex = /(?:^|\n)\s*EXECUTE_COMMAND:\s*"([\s\S]*?)"\s*(?:\n|$)/i;
@@ -1059,6 +1131,7 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         }
 
         const command = normalizeWrappedString(rawContent.replace(/^["']|["']$/g, ''));
+        if (!command || command.startsWith('{')) return null;
         return {
             raw: xmlExecMatch[0],
             toolName: 'execute_command',
@@ -1123,8 +1196,48 @@ const parseToolCallFromResponse = (response: string): ParsedToolCall | null => {
         }
     }
 
+    // Recover a common truncated XML-style call emitted at the end of a response:
+    // <tool_name>{"arg":"value"}> (missing </tool_name>).
+    const recoveredTrailingTool = recoverTrailingJsonToolCall(normalizedResponse);
+    if (recoveredTrailingTool && !STRUCTURAL_TAGS.has(recoveredTrailingTool.toolName)) {
+        const { raw, toolName, payloadText } = recoveredTrailingTool;
+        const payload = parseToolPayloadObject(payloadText);
+        if (payload) {
+            if (toolName === 'execute_command') {
+                const normalized = normalizeExecuteCommandPayload(payload, payloadText);
+                if (!normalized) return null;
+                return {
+                    raw,
+                    toolName,
+                    commandText: normalized.commandText,
+                    parsedKeys: [],
+                    toolArgs: normalized.toolArgs,
+                };
+            }
+
+            if (toolName === 'send_keys') {
+                const normalized = normalizeSendKeysPayloadObject(payload, payloadText);
+                if (!normalized) return null;
+                return {
+                    raw,
+                    toolName,
+                    commandText: normalized.commandText,
+                    parsedKeys: normalized.parsedKeys,
+                    toolArgs: normalized.toolArgs,
+                };
+            }
+
+            return {
+                raw,
+                toolName,
+                commandText: summarizeGenericToolPayload(payload, payloadText),
+                parsedKeys: [],
+                toolArgs: JSON.stringify(payload),
+            };
+        }
+    }
+
     // Catch-all XML bare tool: <tool_name>content</tool_name>
-    const STRUCTURAL_TAGS = new Set(['analysis', 'progress', 'tasklist', 'execution_plan', 'walkthrough', 'report', 'execution', 'artifact', 'reasoning', 'thought', 'thinking', 'reflection']);
     const xmlBareMatch = normalizedResponse.match(xmlBareToolRegex);
     if (xmlBareMatch) {
         const toolName = xmlBareMatch[1].toLowerCase();
@@ -1357,6 +1470,7 @@ const stripToolCallMarkup = (value: string): string => (
     normalizeEscapedXmlToolTags(value)
         .replace(/<\/?execution>/gi, '')
         .replace(/<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*?}\s*<\/\1>/g, '')
+        .replace(/<(?!\/?(?:analysis|progress|tasklist|execution_plan|walkthrough|report|artifact)\b)([a-zA-Z0-9_:-]+)>\s*{[\s\S]*}\s*>?\s*$/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim()
 );
@@ -1479,6 +1593,19 @@ const detectInteractiveLaunchState = (commandText: string, terminalText: string)
 };
 
 
+const MaterialIcon = ({ name, className = '' }: { name: string, className?: string }) => (
+    <span className={`material-symbols-outlined ${className}`.trim()} aria-hidden="true">{name}</span>
+);
+
+function getMessageIcon(role: Message['role'], content: string): string {
+    if (role === 'user') return 'mood';
+    if (role === 'assistant') return 'support_agent';
+    if (role === 'tool') return 'code';
+    if (/failed|failure|error|실패|오류/i.test(content)) return 'error';
+    if (/^Executing\s/i.test(content.trim())) return 'progress_activity';
+    return 'info';
+}
+
 const ReasoningBox = ({ content, isThinking, durationMs }: { content: string, isThinking: boolean, durationMs?: number }) => {
     const [isCollapsed, setIsCollapsed] = useState(!isThinking);
 
@@ -1491,7 +1618,7 @@ const ReasoningBox = ({ content, isThinking, durationMs }: { content: string, is
     return (
         <div className={`reasoning-status ${isCollapsed ? 'collapsed' : ''}`} style={{ background: '#111', border: 'none' }}>
             <div className="reasoning-header" onClick={() => setIsCollapsed(!isCollapsed)} style={{ color: '#888', textTransform: 'none', border: 'none' }}>
-                <span style={{ fontSize: '10px' }}>{isCollapsed ? '▶' : '▼'}</span>
+                <MaterialIcon name={isCollapsed ? 'chevron_right' : 'expand_more'} className="reasoning-toggle-icon" />
                 <span>{isThinking ? 'Thinking...' : formatThoughtDuration(durationMs || 0)}</span>
             </div>
             {!isCollapsed && (
@@ -1505,6 +1632,9 @@ const ReasoningBox = ({ content, isThinking, durationMs }: { content: string, is
 };
 
 function App() {
+    const tabListRef = useRef<HTMLDivElement | null>(null);
+    const tabDragStateRef = useRef<TabDragState | null>(null);
+    const suppressTabClickUntilRef = useRef(0);
     const terminalContainersRef = useRef<{ [id: string]: HTMLDivElement | null }>({});
     const xtermsRef = useRef<{ [id: string]: Terminal | null }>({});
     const fitAddonsRef = useRef<{ [id: string]: FitAddon | null }>({});
@@ -1560,7 +1690,14 @@ function App() {
     const [enabledTools, setEnabledTools] = useState<string[]>(() => {
         try {
             const saved = localStorage.getItem('enabledTools');
-            return saved ? JSON.parse(saved) : DEFAULT_ENABLED_TOOLS;
+            const parsed = saved ? JSON.parse(saved) : DEFAULT_ENABLED_TOOLS;
+            if (!Array.isArray(parsed)) return DEFAULT_ENABLED_TOOLS;
+            const migrationKey = 'enabledTools.readBufferedSource.v1';
+            if (!localStorage.getItem(migrationKey)) {
+                localStorage.setItem(migrationKey, 'true');
+                return parsed.includes('read_buffered_source') ? parsed : [...parsed, 'read_buffered_source'];
+            }
+            return parsed;
         } catch (e) {
             console.error("Error parsing enabledTools", e);
             return DEFAULT_ENABLED_TOOLS;
@@ -1688,6 +1825,8 @@ ${t('greeting')}`
     const currentThinkingRef = useRef('');
     const currentReasoningStartedAtRef = useRef<number | null>(null);
     const requestSequenceRef = useRef(0);
+    const lastTerminalAssessmentHintRef = useRef('');
+    const lastTerminalObservationRef = useRef<TerminalObservation | null>(null);
     const llmProgressHideTimeoutRef = useRef<number | null>(null);
     const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
     const lastTokenAtRef = useRef<number>(0);
@@ -2106,6 +2245,163 @@ ${t('greeting')}`
         openNewTab();
     };
 
+    const handleTabPointerDown = (event: React.PointerEvent<HTMLDivElement>, tabId: string) => {
+        if (event.button !== 0 || tabs.length < 2) return;
+        if ((event.target as HTMLElement).closest('.close-tab')) return;
+
+        const tabList = tabListRef.current;
+        if (!tabList) return;
+
+        const sourceNode = event.currentTarget;
+        const tabNodes = Array.from(tabList.querySelectorAll<HTMLDivElement>('.tab-item'));
+        tabDragStateRef.current = {
+            tabId,
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            offsetX: 0,
+            railTop: 0,
+            insertionIndex: Math.max(0, tabNodes.indexOf(sourceNode)),
+            activated: false,
+            sourceNode,
+            placeholderNode: null,
+        };
+    };
+
+    const handleTabClick = (tabId: string) => {
+        if (Date.now() < suppressTabClickUntilRef.current) return;
+        setActiveTabId(tabId);
+    };
+
+    useEffect(() => {
+        const finishTabDrag = (commit: boolean, allowStateUpdate = true) => {
+            const drag = tabDragStateRef.current;
+            if (!drag) return;
+
+            const { activated, insertionIndex, placeholderNode, sourceNode, tabId } = drag;
+            if (activated) {
+                if (placeholderNode?.parentNode) {
+                    placeholderNode.parentNode.insertBefore(sourceNode, placeholderNode);
+                    placeholderNode.remove();
+                }
+                sourceNode.classList.remove('dragging');
+                sourceNode.removeAttribute('aria-grabbed');
+                sourceNode.style.removeProperty('left');
+                sourceNode.style.removeProperty('top');
+                sourceNode.style.removeProperty('width');
+                sourceNode.style.removeProperty('height');
+                document.body.classList.remove('tab-drag-active');
+            }
+
+            tabDragStateRef.current = null;
+            if (!activated || !allowStateUpdate) return;
+
+            if (commit) {
+                setTabs(previousTabs => {
+                    const sourceIndex = previousTabs.findIndex(tab => tab.id === tabId);
+                    if (sourceIndex < 0) return previousTabs;
+                    const reorderedTabs = [...previousTabs];
+                    const [movedTab] = reorderedTabs.splice(sourceIndex, 1);
+                    reorderedTabs.splice(Math.min(Math.max(insertionIndex, 0), reorderedTabs.length), 0, movedTab);
+                    return reorderedTabs;
+                });
+                setActiveTabId(tabId);
+                suppressTabClickUntilRef.current = Date.now() + 250;
+                window.setTimeout(() => xtermsRef.current[tabId]?.focus(), 0);
+            } else {
+                setTabs(previousTabs => [...previousTabs]);
+            }
+        };
+
+        const activateTabDrag = (drag: TabDragState) => {
+            const tabList = tabListRef.current;
+            if (!tabList || !drag.sourceNode.isConnected) return false;
+
+            const bounds = drag.sourceNode.getBoundingClientRect();
+            const placeholder = document.createElement('div');
+            placeholder.className = 'tab-drag-placeholder';
+            placeholder.style.width = `${bounds.width}px`;
+            placeholder.style.height = `${bounds.height}px`;
+            placeholder.style.flexBasis = `${bounds.width}px`;
+            placeholder.setAttribute('aria-hidden', 'true');
+
+            tabList.insertBefore(placeholder, drag.sourceNode.nextSibling);
+            drag.sourceNode.classList.add('dragging');
+            drag.sourceNode.setAttribute('aria-grabbed', 'true');
+            drag.sourceNode.style.left = `${bounds.left}px`;
+            drag.sourceNode.style.top = `${bounds.top}px`;
+            drag.sourceNode.style.width = `${bounds.width}px`;
+            drag.sourceNode.style.height = `${bounds.height}px`;
+            document.body.appendChild(drag.sourceNode);
+            document.body.classList.add('tab-drag-active');
+
+            drag.offsetX = drag.startX - bounds.left;
+            drag.railTop = bounds.top;
+            drag.placeholderNode = placeholder;
+            drag.activated = true;
+            return true;
+        };
+
+        const handlePointerMove = (event: PointerEvent) => {
+            const drag = tabDragStateRef.current;
+            if (!drag || event.pointerId !== drag.pointerId) return;
+
+            if (!drag.activated && Math.abs(event.clientX - drag.startX) < 6) return;
+            if (!drag.activated && !activateTabDrag(drag)) {
+                tabDragStateRef.current = null;
+                return;
+            }
+
+            event.preventDefault();
+            drag.sourceNode.style.left = `${event.clientX - drag.offsetX}px`;
+            drag.sourceNode.style.top = `${drag.railTop}px`;
+
+            const tabList = tabListRef.current;
+            const placeholder = drag.placeholderNode;
+            if (!tabList || !placeholder) return;
+
+            const candidates = Array.from(tabList.querySelectorAll<HTMLDivElement>('.tab-item:not(.dragging)'));
+            const targetIndex = candidates.findIndex(candidate => {
+                const bounds = candidate.getBoundingClientRect();
+                return event.clientX < bounds.left + bounds.width / 2;
+            });
+            drag.insertionIndex = targetIndex < 0 ? candidates.length : targetIndex;
+
+            if (targetIndex < 0) {
+                tabList.insertBefore(placeholder, tabList.querySelector('.add-tab-btn'));
+            } else {
+                tabList.insertBefore(placeholder, candidates[targetIndex]);
+            }
+
+            const stripBounds = tabList.getBoundingClientRect();
+            const edgeSize = 48;
+            if (event.clientX < stripBounds.left + edgeSize) {
+                tabList.scrollBy({ left: -14 });
+            } else if (event.clientX > stripBounds.right - edgeSize) {
+                tabList.scrollBy({ left: 14 });
+            }
+        };
+
+        const handlePointerUp = (event: PointerEvent) => {
+            if (event.pointerId !== tabDragStateRef.current?.pointerId) return;
+            finishTabDrag(true);
+        };
+
+        const handlePointerCancel = (event: PointerEvent) => {
+            if (event.pointerId !== tabDragStateRef.current?.pointerId) return;
+            finishTabDrag(false);
+        };
+
+        document.addEventListener('pointermove', handlePointerMove, { passive: false });
+        document.addEventListener('pointerup', handlePointerUp);
+        document.addEventListener('pointercancel', handlePointerCancel);
+        return () => {
+            document.removeEventListener('pointermove', handlePointerMove);
+            document.removeEventListener('pointerup', handlePointerUp);
+            document.removeEventListener('pointercancel', handlePointerCancel);
+            finishTabDrag(false, false);
+        };
+    }, []);
+
     const handleToggleFullscreen = async () => {
         try {
             const nextState = !(await WindowIsFullscreen());
@@ -2405,6 +2701,8 @@ ${t('greeting')}`
             case 'naver_search':
             case 'namu_wiki':
                 return clampText(trimmed, 900);
+            case 'read_buffered_source':
+                return clampText(trimmed, 3600);
             default:
                 return clampText(trimmed, 400);
         }
@@ -2451,6 +2749,7 @@ ${t('greeting')}`
         fallbackResponse: string,
         contextLabel: string,
         temp: number,
+        outputTokenLimit: number,
     ): Promise<string> => {
         let timeoutHandle: number | null = null;
         let timedOut = false;
@@ -2458,7 +2757,7 @@ ${t('greeting')}`
 
         try {
             const response = await Promise.race([
-                FetchLLMResponse(apiUrl, apiKey, modelName, maxTokens, temp, provider, true, llmMessages),
+                FetchLLMResponse(apiUrl, apiKey, modelName, outputTokenLimit, temp, provider, true, llmMessages),
                 new Promise<string>((resolve) => {
                     const checkInterval = 2000;
                     const maxIdleMs = FOLLOW_UP_LLM_TIMEOUT_MS;
@@ -2542,7 +2841,6 @@ ${t('greeting')}`
         toolLoopCount = 1,
     ) => {
         appendToolResultToHistory(historyToSend, toolName, toolArgs, result);
-        await syncRecentTerminalContextBuffer(activeTabId);
 
         let nextResponse = '';
         if (responseSansCommand) {
@@ -2556,11 +2854,15 @@ ${t('greeting')}`
             deps: promptHarnessDeps,
         });
         const adaptive = getAdaptiveBaseToolTemperature(historyToSend, toolName, toolArgs, toolLoopCount);
+        const followUpMaxTokens = Math.min(maxTokens, TOOL_FOLLOW_UP_MAX_TOKENS);
+        const promptMetrics = getPromptMetrics(llmMessages);
         updateDebugTrace({
             requestMeta: maskSensitiveText([
                 `Provider: ${provider}`,
                 `Model: ${modelName}`,
-                `MaxTokens: ${maxTokens}`,
+                `MaxTokens: ${followUpMaxTokens}`,
+                `PromptChars: ${promptMetrics.chars}`,
+                `EstimatedInputTokens: ${promptMetrics.estimatedTokens}`,
                 `Temperature: ${adaptive.baseTemperature}`,
                 `Configured Tool Temperature: ${toolTemperature}`,
                 `Base Tool Temperature: ${adaptive.baseTemperature}`,
@@ -2577,7 +2879,8 @@ ${t('greeting')}`
                 ? t('followUpDelayed')
                 : t('toolFollowUpDelayed').replace('{tool}', toolName),
             `continueAfterToolExecution:${toolName}`,
-            adaptive.baseTemperature
+            adaptive.baseTemperature,
+            followUpMaxTokens,
         );
         return nextResponse;
     };
@@ -2619,6 +2922,58 @@ ${t('greeting')}`
     const getLastMeaningfulTerminalLine = (terminalText: string): string => {
         const lines = getRecentMeaningfulTerminalLines(terminalText, 1);
         return lines[0] || '';
+    };
+
+    const getTerminalEvidenceLines = (terminalText: string, commandText: string): string[] => {
+        const normalizedCommand = commandText.trim();
+        return getRecentMeaningfulTerminalLines(terminalText, 12).filter(line => {
+            const trimmed = line.trim();
+            if (!trimmed || looksLikeShellPromptLine(trimmed)) return false;
+            if (trimmed === normalizedCommand) return false;
+
+            const promptMarkerIndex = Math.max(
+                trimmed.lastIndexOf(' % '),
+                trimmed.lastIndexOf(' $ '),
+                trimmed.lastIndexOf(' # '),
+                trimmed.lastIndexOf('> '),
+            );
+            if (promptMarkerIndex >= 0) {
+                const echoedCommand = trimmed.slice(promptMarkerIndex + (trimmed[promptMarkerIndex] === '>' ? 2 : 3)).trim();
+                if (echoedCommand === normalizedCommand) return false;
+            }
+
+            return true;
+        });
+    };
+
+    const scopeTerminalTextToCurrentCommand = (terminalText: string, commandText: string): string => {
+        const lines = terminalText.split('\n');
+        const normalizedCommand = commandText.trim();
+        if (!normalizedCommand) return terminalText;
+
+        for (let index = lines.length - 1; index >= 0; index -= 1) {
+            const trimmed = lines[index].trim();
+            if (
+                trimmed === normalizedCommand
+                || trimmed.endsWith(` % ${normalizedCommand}`)
+                || trimmed.endsWith(` $ ${normalizedCommand}`)
+                || trimmed.endsWith(` # ${normalizedCommand}`)
+                || trimmed.endsWith(`> ${normalizedCommand}`)
+            ) {
+                return lines.slice(index + 1).join('\n');
+            }
+        }
+
+        return terminalText;
+    };
+
+    const buildTerminalEvidenceFallback = (observation: TerminalObservation): string => {
+        const evidenceLines = getTerminalEvidenceLines(observation.recentEvidence, observation.commandText);
+        if (evidenceLines.length === 0) {
+            return `터미널 명령 \`${observation.commandText}\`이 정상 완료되었습니다.`;
+        }
+
+        return `확인 결과입니다.\n\n\`\`\`text\n${evidenceLines.join('\n')}\n\`\`\``;
     };
 
     const delay = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
@@ -2761,38 +3116,40 @@ ${t('greeting')}`
             ? await waitForTerminalScreenIdle(pendingObservation.baselineVisible, 5000, 1000, 150)
             : { visibleTerminal: getVisibleTerminalText(), changedSinceCommand: false };
 
-        const tailArgs = JSON.stringify({ lines: 60, maxWaitMs: 2500, idleMs: 1000 });
-        const { result: tail } = await callToolWithClientTimeout(
-            'read_terminal_tail',
-            tailArgs,
-            '(terminal tail unavailable: client timeout while waiting for MCP acknowledgement)',
-        );
         await syncRecentTerminalContextBuffer(activeTabId);
         const visibleTerminal = idleSnapshot.visibleTerminal;
-        const tailAvailable = !tail.includes('terminal tail unavailable');
         const recentBuffer = getRecentTerminalContextBuffer(activeTabId);
-        const combinedTerminal = [visibleTerminal.trim(), tail.trim(), recentBuffer.trim()].filter(Boolean).join('\n');
+        const commandDeltaLines = pendingObservation
+            ? extractNewTerminalLines(pendingObservation.baselineBuffer, recentBuffer, 10)
+            : [];
+        const tail = commandDeltaLines.length > 0 ? commandDeltaLines.join('\n') : recentBuffer;
+        const tailAvailable = Boolean(tail.trim());
+        const combinedTerminal = [visibleTerminal.trim(), tail.trim()].filter(Boolean).join('\n');
         const promptRecovered = hasRecoveredShellPrompt(visibleTerminal) || hasRecoveredShellPrompt(tail);
         const interactiveState = toolName === 'execute_command' && isInteractiveTerminalLaunch(commandText)
             ? detectInteractiveLaunchState(commandText, combinedTerminal)
             : null;
         const blocker = detectTerminalBlockerState(combinedTerminal);
-        const commandDeltaLines = pendingObservation
-            ? extractNewTerminalLines(pendingObservation.baselineBuffer, recentBuffer, 10)
-            : [];
-        const preferredEvidenceSource = commandDeltaLines.length > 0
+        const unscopedEvidenceSource = commandDeltaLines.length > 0
             ? commandDeltaLines.join('\n')
-            : tailAvailable
-                ? (tail.trim() === '(no recent terminal output)' ? combinedTerminal : tail)
-                : combinedTerminal || toolResult;
-        const evidenceLines = getRecentMeaningfulTerminalLines(preferredEvidenceSource, 10);
+            : tailAvailable ? tail : combinedTerminal || toolResult;
+        const preferredEvidenceSource = scopeTerminalTextToCurrentCommand(unscopedEvidenceSource, commandText);
+        const evidenceLines = getRecentMeaningfulTerminalLines(preferredEvidenceSource, 30);
         const recentEvidence = evidenceLines.length > 0
             ? evidenceLines.join('\n')
             : (toolResult.trim() || '(no observable terminal details)');
-        const lastMeaningfulLine = commandDeltaLines.length > 0
-            ? commandDeltaLines[commandDeltaLines.length - 1]
-            : getLastMeaningfulTerminalLine(visibleTerminal) || getLastMeaningfulTerminalLine(recentEvidence);
-        const assessmentHint = detectTerminalAssessmentHint(commandText, toolResult, combinedTerminal, promptRecovered, blocker, interactiveState);
+        const terminalEvidenceLines = getTerminalEvidenceLines(preferredEvidenceSource, commandText);
+        const lastMeaningfulLine = terminalEvidenceLines[terminalEvidenceLines.length - 1]
+            || getLastMeaningfulTerminalLine(recentEvidence);
+        // Only assess output produced by the current command. Scanning the whole
+        // visible terminal can misclassify a successful command because an older
+        // "command not found" or error is still on screen.
+        const currentCommandEvidence = commandDeltaLines.length > 0
+            ? scopeTerminalTextToCurrentCommand(commandDeltaLines.join('\n'), commandText)
+            : idleSnapshot.changedSinceCommand
+                ? scopeTerminalTextToCurrentCommand(visibleTerminal, commandText)
+                : '';
+        const assessmentHint = detectTerminalAssessmentHint(commandText, toolResult, currentCommandEvidence, promptRecovered, blocker, interactiveState);
         if (toolName === 'execute_command') {
             delete pendingTerminalObservationRef.current[activeTabId];
         }
@@ -2823,9 +3180,13 @@ ${t('greeting')}`
     ) => {
         const analysisPrompt = `${baseSystemPrompt}
 5. TERMINAL FOLLOW-UP: You will receive the user's latest request, the terminal action that was run, and a structured terminal status snapshot collected by the app. Answer the user's request directly from the observed terminal result, not by describing the observation process.
-6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and briefly weave in the most relevant terminal detail in a natural sentence. Treat "Last meaningful line after terminal idle" as the strongest clue for the latest command when it is available. Do not add labels such as "증거:", "근거:", "evidence:", or bullet lists unless the user explicitly asked for them. If it failed, start with "${t('workFailed')}" and explain why. If the result is still inconclusive, start with "${t('workIncomplete')}" and explain what is missing. Use SCREEN_CONTEXT only as a secondary clue when the terminal snapshot is ambiguous. Do not emit tool calls in this follow-up summary.
-7. Treat "assessment hint" as a hint, not a guaranteed truth. Prefer the concrete terminal lines when they contradict the hint.
-8. If COMPLEX TASK MODE applies, preserve the same runbook style and end with a <report> block instead of a plain summary when possible.`;
+6. TERMINAL FOLLOW-UP FORMAT: If the request has been satisfied, answer it directly in natural Korean and briefly weave in the most relevant terminal detail in a natural sentence. Treat "Last meaningful line after terminal idle" as the strongest clue for the latest command when it is available. Do not add labels such as "증거:", "근거:", "evidence:", or bullet lists unless the user explicitly asked for them.
+7. FAILURE RECOVERY: If the command failed or the result is inconclusive and a safe alternative command, diagnostic, or available tool can advance the same request, do not summarize or ask the user to run it. Emit exactly one appropriate tool call yourself and continue the task. Adapt the command to Current OS and the observed error. Only report "${t('workFailed')}" or "${t('workIncomplete')}" when no safe available action can make further progress, and state the concrete blocker.
+8. Use SCREEN_CONTEXT only as a secondary clue when the terminal snapshot is ambiguous. Never claim success without observed evidence.
+9. Treat "assessment hint" as a hint, not a guaranteed truth. Prefer the concrete terminal lines when they contradict the hint.
+10. SUCCESSFUL QUERY RULE: When the assessment is prompt_recovered, the terminal changed, and the current-command evidence does not show an error, the command completed. Answer from that evidence now. Do not call the same command again merely to reconfirm it.
+11. EVIDENCE FIDELITY: Never invent, interpolate, or reuse file names, values, paths, or counts that do not appear in Current-command evidence. For a directory listing, mention only observed entries and say when the display is abbreviated.
+12. If COMPLEX TASK MODE applies, preserve the same runbook style and end with a <report> block instead of a plain summary when possible.`;
 
         const observationBlock = [
             `[Terminal action]`,
@@ -2861,11 +3222,14 @@ ${t('greeting')}`
             includeScreenContext: true,
             deps: promptHarnessDeps,
         });
+        const promptMetrics = getPromptMetrics(llmMessages);
         updateDebugTrace({
             requestMeta: maskSensitiveText([
                 `Provider: ${provider}`,
                 `Model: ${modelName}`,
-                `MaxTokens: ${maxTokens}`,
+                `MaxTokens: ${Math.min(maxTokens, TERMINAL_SUMMARY_MAX_TOKENS)}`,
+                `PromptChars: ${promptMetrics.chars}`,
+                `EstimatedInputTokens: ${promptMetrics.estimatedTokens}`,
                 `Temperature: ${toolTemperature}`,
                 `Context Source: summarizeTerminalObservation`,
             ].join('\n'), apiKey),
@@ -2876,7 +3240,8 @@ ${t('greeting')}`
             llmMessages,
             t('cmdFollowUpDelayed').replace('{cmd}', observation.commandText),
             `summarizeTerminalObservation:${observation.commandText}`,
-            toolTemperature
+            toolTemperature,
+            Math.min(maxTokens, TERMINAL_SUMMARY_MAX_TOKENS),
         );
     };
 
@@ -2893,11 +3258,16 @@ ${t('greeting')}`
             };
         }
 
-        const timeoutMs = (toolName === 'send_keys')
+        const requestedWaitMs = Number(parsedToolTimeoutArg(toolArgs, 'maxWaitMs')) || 0;
+        const timeoutMs = toolName === 'send_keys'
             ? 2500
             : toolName === 'read_terminal_tail'
-                ? 1800
-                : 8000;
+                ? Math.max(2500, requestedWaitMs + 1500)
+                : toolName === 'read_web_page' || toolName === 'naver_search' || toolName === 'namu_wiki'
+                    ? 40000
+                    : toolName === 'search_web'
+                        ? 15000
+                        : 8000;
 
         let timeoutHandle: number | null = null;
         try {
@@ -2969,6 +3339,13 @@ ${t('greeting')}`
             return buildTerminalToolSummary(toolName, commandText, responseSansCommand);
         }
         const observation = await observeTerminalAfterTool(toolName, commandText, toolResult);
+        lastTerminalAssessmentHintRef.current = observation.assessmentHint;
+        lastTerminalObservationRef.current = observation;
+        historyToSend.push({
+            role: 'user',
+            name: 'terminal_observation',
+            content: `[Tool Response from terminal_observation]: Assessment: ${observation.assessmentHint}\nCommand: ${observation.commandText}\nCurrent-command evidence:\n${observation.recentEvidence}`,
+        });
         return summarizeTerminalObservation(
             getLatestUserRequest(historyToSend),
             observation,
@@ -3161,7 +3538,7 @@ ${t('greeting')}`
                 return [...updated, { role: 'assistant', content: response || t('cmdDoneNoResponse'), reasoning: currentThinking }];
             });
         } catch (error: any) {
-            setMessages(prev => [...prev, { role: 'system', content: `❌ ${t('approvedCmdFailed')} ${error.message || error}` }]);
+            setMessages(prev => [...prev, { role: 'system', content: `${t('approvedCmdFailed')} ${error.message || error}` }]);
         } finally {
             setIsLoading(false);
             setIsThinking(false);
@@ -3191,6 +3568,8 @@ ${t('greeting')}`
         setIsLoading(true);
         setCurrentThinking('');
         currentThinkingRef.current = '';
+        lastTerminalAssessmentHintRef.current = '';
+        lastTerminalObservationRef.current = null;
         setIsThinking(false);
         resetReasoningTimer();
         setLlmProgress({
@@ -3210,10 +3589,12 @@ ${t('greeting')}`
                 mcpLabel,
                 currentOS: window.navigator.platform,
                 currentWorkingDirectory,
+                currentRequest: trimmedInput,
                 complexRequest,
                 availableTools: activeTools,
                 globalUserPrompt,
             });
+            const localSystemEvidenceRequired = requiresLocalSystemEvidence(trimmedInput);
 
             const historyToSend = newMessages.filter((msg, idx) => {
                 if (idx === 0 && msg.role === 'assistant') return false;
@@ -3221,14 +3602,18 @@ ${t('greeting')}`
             });
             const loopHistory = [...historyToSend];
 
-            await syncRecentTerminalContextBuffer(activeTabId);
-            const initialScreenContext = shouldIncludeScreenContext(loopHistory) ? buildScreenContext(loopHistory) : '(screen context disabled)';
+            const includeInitialScreenContext = shouldIncludeScreenContext(loopHistory);
+            if (includeInitialScreenContext) {
+                await syncRecentTerminalContextBuffer(activeTabId);
+            }
+            const initialScreenContext = includeInitialScreenContext ? buildScreenContext(loopHistory) : '(screen context disabled)';
             let currentMessages: any[] = buildLLMMessages({
                 history: loopHistory,
                 baseSystemPrompt,
-                includeScreenContext: shouldIncludeScreenContext(loopHistory),
+                includeScreenContext: includeInitialScreenContext,
                 deps: promptHarnessDeps,
             });
+            const initialPromptMetrics = getPromptMetrics(currentMessages);
             updateDebugTrace({
                 screenContext: maskSensitiveText(initialScreenContext, apiKey),
                 requestMeta: maskSensitiveText([
@@ -3238,6 +3623,8 @@ ${t('greeting')}`
                     `Temperature: ${temperature}`,
                     `Context Source: sendMessage`,
                     `Messages: ${currentMessages.length}`,
+                    `PromptChars: ${initialPromptMetrics.chars}`,
+                    `EstimatedInputTokens: ${initialPromptMetrics.estimatedTokens}`,
                 ].join('\n'), apiKey),
                 requestMessages: maskSensitiveText(safeJsonStringify(currentMessages), apiKey),
                 rawResponse: '',
@@ -3245,7 +3632,7 @@ ${t('greeting')}`
                 toolExecutions: [],
                 terminalNotes: '',
             });
-            console.log(`[LLM] Sending ${currentMessages.length} messages (screen context: ${shouldIncludeScreenContext(loopHistory) ? 'on' : 'off'})`);
+            console.log(`[LLM] Sending ${currentMessages.length} messages (screen context: ${includeInitialScreenContext ? 'on' : 'off'})`);
             let response = '';
             let commandIntercepted = false;
             setCurrentThinking('');
@@ -3283,11 +3670,12 @@ ${t('greeting')}`
 
             if (!isCurrentRequest()) return;
             for (let continuationAttempt = 0; continuationAttempt < 3; continuationAttempt++) {
-                if (
-                    !needsContinuationAfterPlan(response)
-                    && !needsContinuationAfterTrailingSection(response)
-                    && !shouldContinueAfterActionlessAnalysis(response, trimmedInput)
-                ) {
+                const stoppedAfterPlan = needsContinuationAfterPlan(response);
+                const stoppedAfterSection = needsContinuationAfterTrailingSection(response);
+                const delegatedKnownAction = shouldContinueAfterDelegatedAction(response, trimmedInput);
+                const stoppedAfterAnalysis = shouldContinueAfterActionlessAnalysis(response, trimmedInput);
+                const missingLocalSystemEvidence = localSystemEvidenceRequired && !parseToolCallFromResponse(response);
+                if (!stoppedAfterPlan && !stoppedAfterSection && !delegatedKnownAction && !stoppedAfterAnalysis && !missingLocalSystemEvidence) {
                     break;
                 }
                 ensureAssistantPlaceholder();
@@ -3299,44 +3687,50 @@ ${t('greeting')}`
                     { role: 'assistant' as const, content: response },
                     {
                         role: 'user' as const,
-                        content: needsContinuationAfterPlan(response)
+                        content: stoppedAfterPlan
                             ? '[App Notice] The previous reply stopped after an Execution Plan and did not actually carry out the task yet. Continue from that plan now and perform the next concrete action instead of restating the plan.'
-                            : needsContinuationAfterTrailingSection(response)
+                            : stoppedAfterSection
                                 ? '[App Notice] The previous reply ended on a progress-like section and appears incomplete. Continue from the last section now and perform the next concrete action or finish the report instead of repeating prior sections.'
-                                : '[App Notice] The previous reply only analyzed the request and did not actually perform the next action yet. Continue now by calling the appropriate tool or terminal command instead of repeating the analysis.',
+                                : missingLocalSystemEvidence
+                                    ? '[App Notice] This request asks for the current local machine state, but the previous reply did not collect local evidence. Do not use web search or answer from memory. Call execute_command or another appropriate local tool for the current OS, inspect the observed result, and continue until the requested fact is verified.'
+                                    : delegatedKnownAction
+                                        ? '[App Notice] The previous reply handed a known command or verification step to the user even though an available tool can perform it. Do not ask the user to run it. Call the appropriate tool yourself now, adapt it to the current OS, and continue until the request is verified or a real blocker remains.'
+                                        : '[App Notice] The previous reply only analyzed the request and did not actually perform the next action yet. Continue now by calling the appropriate tool or terminal command instead of repeating the analysis.',
                     },
                 ];
-                await syncRecentTerminalContextBuffer(activeTabId);
+                const includeContinuationScreenContext = shouldIncludeScreenContext(continuationHistory);
+                if (includeContinuationScreenContext) {
+                    await syncRecentTerminalContextBuffer(activeTabId);
+                }
+                const continuationMessages = buildLLMMessages({
+                    history: continuationHistory,
+                    baseSystemPrompt,
+                    includeScreenContext: includeContinuationScreenContext,
+                    deps: promptHarnessDeps,
+                });
+                const continuationPromptMetrics = getPromptMetrics(continuationMessages);
                 updateDebugTrace({
-                    screenContext: maskSensitiveText(buildScreenContext(continuationHistory), apiKey),
+                    screenContext: maskSensitiveText(includeContinuationScreenContext ? buildScreenContext(continuationHistory) : '(screen context disabled)', apiKey),
                     requestMeta: maskSensitiveText([
                         `Provider: ${provider}`,
                         `Model: ${modelName}`,
-                        `MaxTokens: ${maxTokens}`,
+                        `MaxTokens: ${Math.min(maxTokens, TOOL_FOLLOW_UP_MAX_TOKENS)}`,
+                        `PromptChars: ${continuationPromptMetrics.chars}`,
+                        `EstimatedInputTokens: ${continuationPromptMetrics.estimatedTokens}`,
                         `Temperature: ${temperature}`,
                         `Context Source: continuation (attempt ${continuationAttempt + 1})`,
                     ].join('\n'), apiKey),
-                    requestMessages: maskSensitiveText(safeJsonStringify(buildLLMMessages({
-                        history: continuationHistory,
-                        baseSystemPrompt,
-                        includeScreenContext: shouldIncludeScreenContext(continuationHistory),
-                        deps: promptHarnessDeps,
-                    })), apiKey),
+                    requestMessages: maskSensitiveText(safeJsonStringify(continuationMessages), apiKey),
                 });
                 response = await FetchLLMResponse(
                     apiUrl,
                     apiKey,
                     modelName,
-                    maxTokens,
+                    Math.min(maxTokens, TOOL_FOLLOW_UP_MAX_TOKENS),
                     temperature,
                     provider,
                     true,
-                    buildLLMMessages({
-                        history: continuationHistory,
-                        baseSystemPrompt,
-                        includeScreenContext: shouldIncludeScreenContext(continuationHistory),
-                        deps: promptHarnessDeps,
-                    }),
+                    continuationMessages,
                 );
                 updateDebugTrace({
                     rawResponse: maskSensitiveText(response, apiKey),
@@ -3346,6 +3740,10 @@ ${t('greeting')}`
             }
 
             let toolLoopCount = 0;
+            let completedToolExecutions = 0;
+            let terminalRecoveryPromptCount = 0;
+            const executedToolSignatures = new Map<string, number>();
+            const executedTerminalCommands: string[] = [];
             while (true) {
                 if (!isCurrentRequest()) return;
                 toolLoopCount += 1;
@@ -3379,9 +3777,63 @@ ${t('greeting')}`
                         ? detectWindowsPowerShellSyntaxIssue(commandText)
                         : null;
                     const toolIsAvailable = activeTools.some(tool => tool.name === toolName);
+                    const toolSignature = serializeToolCallForHistory(toolName, effectiveToolArgs);
+                    const previousExecutionCount = executedToolSignatures.get(toolSignature) || 0;
+                    const previousTerminalObservation = lastTerminalObservationRef.current as TerminalObservation | null;
+                    const successfulDuplicateObservation = toolName === 'execute_command'
+                        && previousExecutionCount > 0
+                        && previousTerminalObservation?.assessmentHint === 'prompt_recovered'
+                        && normalizeCommandForTerminal(previousTerminalObservation.commandText) === normalizeCommandForTerminal(effectiveCommandText);
 
                     // Filter out the tool call from the response to prevent loops and show only final text
                     response = stripToolCallMarkup(response.replace(raw, '').trim());
+
+                    // Small local models occasionally call the exact same read-only command
+                    // after its output and recovered prompt were already observed. Stop that
+                    // loop deterministically and surface the evidence instead of burning the
+                    // remaining tool budget.
+                    if (successfulDuplicateObservation && previousTerminalObservation) {
+                        response = response || buildTerminalEvidenceFallback(previousTerminalObservation);
+                        break;
+                    }
+
+                    if (toolName === 'execute_command' && shouldRejectUnexpectedDirectoryChange(trimmedInput, effectiveCommandText)) {
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            effectiveToolArgs,
+                            `Error: directory change was not executed because the user requested a read-only inspection, not a working-directory change. Use pwd and/or ls with an explicit target without cd, then verify the requested result.`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                            toolLoopCount,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
+                    }
+
+                    if (shouldRedirectWebToolToLocalSystem(trimmedInput, toolName)) {
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            effectiveToolArgs,
+                            `Error: wrong tool route. The user requested current local machine state, so ${toolName} was not executed. Use execute_command or another local tool, adapt the command to ${window.navigator.platform}, observe the result, and reassess completion.`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                            toolLoopCount,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
+                    }
 
                     if (!toolIsAvailable) {
                         ensureAssistantPlaceholder();
@@ -3482,13 +3934,18 @@ ${t('greeting')}`
                     }
 
                     setMessages(prev => {
-                        const next = [...prev, { role: 'system' as const, content: `🔧 Executing ${toolName}...` }];
+                        const next = [...prev, { role: 'system' as const, content: `Executing ${toolName}...` }];
                         messagesRef.current = next;
                         return next;
                     });
 
                     try {
                         const { result, timedOut } = await callToolWithClientTimeout(toolName, effectiveToolArgs);
+                        completedToolExecutions += 1;
+                        executedToolSignatures.set(toolSignature, previousExecutionCount + 1);
+                        if (toolName === 'execute_command') {
+                            executedTerminalCommands.push(normalizeCommandForTerminal(effectiveCommandText));
+                        }
                         if (!isCurrentRequest()) return;
                         console.log(`[MCP] Tool ${toolName} result:`, result);
                         const toolResultForUi: Message = {
@@ -3553,15 +4010,55 @@ ${t('greeting')}`
                         }
                     } catch (err) {
                         if (!isCurrentRequest()) return;
-                        response = `Error calling tool ${toolName}: ${err}`;
-                        break;
+                        ensureAssistantPlaceholder();
+                        setCurrentThinking('');
+                        currentThinkingRef.current = '';
+                        setIsThinking(true);
+                        response = await continueAfterToolExecution(
+                            toolName,
+                            effectiveToolArgs,
+                            `Error calling tool ${toolName}: ${err}. Treat this as FAILED, choose a different safe in-scope approach, and continue instead of finalizing.`,
+                            loopHistory,
+                            baseSystemPrompt,
+                            response,
+                            toolLoopCount,
+                        );
+                        if (!isCurrentRequest()) return;
+                        setIsThinking(false);
+                        continue;
                     }
                 } else {
-                    // Check if response ended on an incomplete progress-like section
+                    const delegatedKnownAction = shouldContinueAfterDelegatedAction(
+                        response,
+                        getLatestUserRequest(loopHistory),
+                    );
+                    const missingLocalSystemEvidence = localSystemEvidenceRequired && completedToolExecutions === 0;
+                    const terminalAssessment = lastTerminalAssessmentHintRef.current;
+                    const terminalRecoveryRequired = shouldRetryAfterTerminalAssessment(
+                        terminalAssessment,
+                        terminalRecoveryPromptCount,
+                    );
+                    const missingRequestedLocalFacts = completedToolExecutions > 0
+                        ? getMissingRequestedLocalFacts(response, getLatestUserRequest(loopHistory))
+                        : [];
+                    const missingRequiredTerminalActions = getMissingRequiredTerminalActions(
+                        getLatestUserRequest(loopHistory),
+                        executedTerminalCommands,
+                    );
+                    // Continue incomplete structured work or recover when the model delegates
+                    // a safe, tool-capable action back to the user.
                     if (
                         needsContinuationAfterPlan(response)
                         || needsContinuationAfterTrailingSection(response)
+                        || delegatedKnownAction
+                        || missingLocalSystemEvidence
+                        || terminalRecoveryRequired
+                        || missingRequestedLocalFacts.length > 0
+                        || missingRequiredTerminalActions.length > 0
                     ) {
+                        if (terminalRecoveryRequired) {
+                            terminalRecoveryPromptCount += 1;
+                        }
                         ensureAssistantPlaceholder();
                         setCurrentThinking('');
                         currentThinkingRef.current = '';
@@ -3571,15 +4068,24 @@ ${t('greeting')}`
                             { role: 'assistant' as const, content: response },
                             {
                                 role: 'user' as const,
-                                content: '[App Notice] The previous reply ended on a progress-like section and appears incomplete. Continue from the last section now and perform the next concrete action or finish the report instead of repeating prior sections.',
+                                content: terminalRecoveryRequired
+                                    ? `[App Notice] Completion check failed with terminal verdict ${terminalAssessment}. A failed or inconclusive attempt is not completion. Re-read the observed error, choose a different safe command or diagnostic appropriate for the current OS, execute it yourself, and reassess the original goal. Do not merely explain the failure or repeat the same command.`
+                                    : missingRequestedLocalFacts.length > 0
+                                        ? `[App Notice] The final answer is incomplete or truncated. It still lacks these requested fields with observed values: ${missingRequestedLocalFacts.join(', ')}. Use the terminal observations already in history and finish the answer now. Do not repeat commands that already succeeded and do not invent values.`
+                                    : missingRequiredTerminalActions.length > 0
+                                        ? `[App Notice] Completion check failed because these required terminal actions have not been observed: ${missingRequiredTerminalActions.join(', ')}. Execute the missing safe read-only action now, inspect its actual output, and then answer. Do not infer results from prior chat text.`
+                                    : missingLocalSystemEvidence
+                                    ? '[App Notice] Completion check failed: the request requires current local-system evidence, but no tool execution has completed. Do not finalize and do not search the web. Use an available local tool now, observe the actual output, classify it as satisfied/failed/inconclusive, and continue accordingly.'
+                                    : delegatedKnownAction
+                                        ? '[App Notice] The previous reply told the user to run a known command or verification step. Do not delegate an action that an available tool can perform. Execute the safe next step yourself now, account for the current OS and the latest error, and continue until the original request is verified or a concrete blocker remains.'
+                                        : '[App Notice] The previous reply ended on a progress-like section and appears incomplete. Continue from the last section now and perform the next concrete action or finish the report instead of repeating prior sections.',
                             },
                         ];
-                        await syncRecentTerminalContextBuffer(activeTabId);
                         response = await FetchLLMResponse(
                             apiUrl,
                             apiKey,
                             modelName,
-                            maxTokens,
+                            Math.min(maxTokens, TOOL_FOLLOW_UP_MAX_TOKENS),
                             Math.min(0.6, toolTemperature + (toolLoopCount >= 6 ? 0.12 : 0)),
                             provider,
                             true,
@@ -3635,7 +4141,7 @@ ${t('greeting')}`
             if (!isCurrentRequest()) return;
             console.error("[LLM] Error in sendMessage:", error);
             setMessages(prev => {
-                const next = [...prev, { role: 'system' as const, content: `❌ LLM Request Failed: ${error.message || error}` }];
+                const next = [...prev, { role: 'system' as const, content: `LLM Request Failed: ${error.message || error}` }];
                 messagesRef.current = next;
                 return next;
             });
@@ -3727,36 +4233,30 @@ ${t('chatCleared')}`
             <div className="main-layout">
                 <div className="terminal-pane">
                     <div className="pane-header">
-                        <div className="tab-list">
+                        <div className="tab-list" ref={tabListRef}>
                             {tabs.map(tab => (
-                                <div key={tab.id} className={`tab-item no-select ${activeTabId === tab.id ? 'active' : ''}`} onClick={() => setActiveTabId(tab.id)}>
+                                <div
+                                    key={tab.id}
+                                    className={`tab-item no-select ${activeTabId === tab.id ? 'active' : ''}`}
+                                    data-tab-id={tab.id}
+                                    onPointerDown={event => handleTabPointerDown(event, tab.id)}
+                                    onClick={() => handleTabClick(tab.id)}
+                                >
                                     {tab.name}
-                                    {tabs.length > 1 && <span className="close-tab" onClick={(e) => removeTab(e, tab.id)}>×</span>}
+                                    {tabs.length > 1 && (
+                                        <button className="close-tab" type="button" aria-label={`Close ${tab.name}`} onClick={(e) => removeTab(e, tab.id)}>
+                                            <MaterialIcon name="close" />
+                                        </button>
+                                    )}
                                 </div>
                             ))}
-                            <button className="add-tab-btn no-select" onClick={addTab} title="New Tab">+</button>
+                            <button className="add-tab-btn no-select" onClick={addTab} title="New Tab" aria-label="New Tab">
+                                <MaterialIcon name="add" />
+                            </button>
                         </div>
                         <div className="header-actions">
                             <button className="icon-btn no-select" title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"} onClick={handleToggleFullscreen}>
-                                {isFullscreen ? (
-                                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none">
-                                        <path d="M9 15H5v4"></path>
-                                        <path d="M15 9h4V5"></path>
-                                        <path d="M5 15l5-5"></path>
-                                        <path d="M19 9l-5 5"></path>
-                                    </svg>
-                                ) : (
-                                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none">
-                                        <path d="M8 3H3v5"></path>
-                                        <path d="M16 3h5v5"></path>
-                                        <path d="M3 16v5h5"></path>
-                                        <path d="M21 16v5h-5"></path>
-                                        <path d="M3 8l6-6"></path>
-                                        <path d="M21 8l-6-6"></path>
-                                        <path d="M3 16l6 6"></path>
-                                        <path d="M21 16l-6 6"></path>
-                                    </svg>
-                                )}
+                                <MaterialIcon name="fit_screen" />
                             </button>
                             <button className="icon-btn no-select" title="Settings" onClick={() => {
                                 setIsSettingsOpen(true);
@@ -3764,7 +4264,7 @@ ${t('chatCleared')}`
                                     handleFetchModels();
                                 }
                             }}>
-                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                                <MaterialIcon name="settings" />
                             </button>
                         </div>
                     </div>
@@ -3820,7 +4320,7 @@ ${t('chatCleared')}`
                         <div className="header-title no-select">Assistant</div>
                         <div className="header-actions">
                             <button className="icon-btn no-select" title="Clear History" onClick={clearMessages}>
-                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                                <MaterialIcon name="delete" />
                             </button>
                         </div>
                     </div>
@@ -3829,7 +4329,8 @@ ${t('chatCleared')}`
                             {messages.map((m, i) => (
                                 <div key={i} className={`message ${m.role}`}>
                                     <div className="message-label no-select">
-                                        {m.role === 'user' ? 'YOU' : m.role === 'tool' ? 'TOOL' : m.role === 'system' ? 'SYSTEM' : ASSISTANT_DISPLAY_NAME.toUpperCase()}
+                                        <MaterialIcon name={getMessageIcon(m.role, m.content)} className="message-label-icon" />
+                                        <span>{m.role === 'user' ? 'YOU' : m.role === 'tool' ? 'TOOL' : m.role === 'system' ? 'SYSTEM' : ASSISTANT_DISPLAY_NAME.toUpperCase()}</span>
                                     </div>
                                     {m.role === 'assistant' && (
                                         <>
@@ -3883,16 +4384,11 @@ ${t('chatCleared')}`
                             ></textarea>
                             {isLoading ? (
                                 <button className="stop-btn" onClick={handleStop} title={t('stop')} aria-label={t('stop')}>
-                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
-                                        <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>
-                                    </svg>
+                                    <MaterialIcon name="disabled_by_default" />
                                 </button>
                             ) : (
                                 <button className="send-btn" onClick={sendMessage} title={t('send')} aria-label={t('send')}>
-                                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                        <path d="M5 12h12"></path>
-                                        <path d="M13 5l7 7-7 7"></path>
-                                    </svg>
+                                    <MaterialIcon name="arrow_forward" />
                                 </button>
                             )}
                         </div>
@@ -3902,7 +4398,9 @@ ${t('chatCleared')}`
                 {isSettingsOpen && (
                     <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
                         <div className="settings-modal" onClick={e => e.stopPropagation()}>
-                            <button className="close-icon-btn" onClick={() => setIsSettingsOpen(false)}>×</button>
+                            <button className="close-icon-btn" onClick={() => setIsSettingsOpen(false)} aria-label={t('close')}>
+                                <MaterialIcon name="close" />
+                            </button>
                             <div className="settings-header">
                                 <h3>{t('settings')}</h3>
                             </div>
@@ -4017,7 +4515,7 @@ ${t('chatCleared')}`
                                             title={t('mcpDocsBtn')}
                                             aria-label={t('mcpDocsBtn')}
                                         >
-                                            ?
+                                            <MaterialIcon name="info" />
                                         </button>
                                     </div>
                                     <div className="settings-grid">
@@ -4136,7 +4634,9 @@ ${t('chatCleared')}`
                         <div className="docs-modal" onClick={e => e.stopPropagation()}>
                             <div className="docs-modal-header">
                                 <h3>{t('mcpDocsTitle')}</h3>
-                                <button className="close-icon-btn" onClick={() => setIsMcpDocsOpen(false)}>×</button>
+                                <button className="close-icon-btn" onClick={() => setIsMcpDocsOpen(false)} aria-label={t('close')}>
+                                    <MaterialIcon name="close" />
+                                </button>
                             </div>
                             <div className="docs-modal-body">
                                 <div className="bubble docs-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(mcpDocsContent) }} />

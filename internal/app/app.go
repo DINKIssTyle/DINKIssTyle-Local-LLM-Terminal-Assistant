@@ -577,6 +577,7 @@ type App struct {
 	lastCommandCursor map[string]int
 	mu                sync.Mutex
 	cancelFunc        context.CancelFunc
+	llmRequestID      uint64
 }
 
 // NewApp creates a new App application struct
@@ -879,6 +880,7 @@ func (a *App) StopLLMResponse() {
 	if a.cancelFunc != nil {
 		a.cancelFunc()
 		a.cancelFunc = nil
+		a.llmRequestID++
 		logVerboseln("[App] LLM Response stopped by user")
 	}
 }
@@ -886,16 +888,20 @@ func (a *App) StopLLMResponse() {
 // FetchLLMResponse makes a call to the local or remote LLM API
 func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, maxTokens int, temperature float64, provider string, isStreaming bool, messages []interface{}) (string, error) {
 	logVerbosef("[LLM] Fetching response from %s (Model: %s, Streaming: %v)", apiURL, modelName, isStreaming)
-	// Cancel any existing request before starting a new one
-	a.StopLLMResponse()
-
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.mu.Lock()
+	if a.cancelFunc != nil {
+		a.cancelFunc()
+	}
+	a.llmRequestID++
+	requestID := a.llmRequestID
 	a.cancelFunc = cancel
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
-		a.cancelFunc = nil
+		if a.llmRequestID == requestID {
+			a.cancelFunc = nil
+		}
 		a.mu.Unlock()
 		cancel()
 	}()
@@ -941,7 +947,8 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 
 	if isStreaming {
 		scanner := bufio.NewScanner(resp.Body)
-		fullContent := ""
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		var fullContent strings.Builder
 		currentEventType := ""
 		lastStreamError := ""
 		logVerbosef("[LLM] Starting SSE stream scanner...")
@@ -1000,9 +1007,9 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 						currentEventType = ""
 						continue
 					case "chat.end":
-						if fullContent == "" {
+						if fullContent.Len() == 0 {
 							if finalContent := collectLMStudioChatOutputMessages(eventData); finalContent != "" {
-								fullContent = finalContent
+								fullContent.WriteString(finalContent)
 							}
 						}
 						emitLLMProgress(a.ctx, "", "", 100, false)
@@ -1017,7 +1024,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 						continue
 					case "message.delta":
 						if content, ok := eventData["content"].(string); ok && content != "" {
-							fullContent += content
+							fullContent.WriteString(content)
 							runtime.EventsEmit(a.ctx, "llm:chunk", content)
 							currentEventType = ""
 							continue
@@ -1052,7 +1059,7 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 					runtime.EventsEmit(a.ctx, "llm:thinking", delta.ReasoningContent)
 				}
 				if delta.Content != "" {
-					fullContent += delta.Content
+					fullContent.WriteString(delta.Content)
 					runtime.EventsEmit(a.ctx, "llm:chunk", delta.Content)
 				}
 			}
@@ -1060,13 +1067,15 @@ func (a *App) FetchLLMResponse(apiURL string, apiKey string, modelName string, m
 		}
 		if err := scanner.Err(); err != nil {
 			log.Printf("[LLM] Scanner error: %v", err)
+			return "", fmt.Errorf("LLM stream read failed: %w", err)
 		}
-		logVerbosef("[LLM] Stream complete. Total length: %d", len(fullContent))
+		responseContent := fullContent.String()
+		logVerbosef("[LLM] Stream complete. Total length: %d", len(responseContent))
 		emitLLMProgress(a.ctx, "", "", 100, false)
-		if strings.TrimSpace(fullContent) == "" && lastStreamError != "" {
+		if strings.TrimSpace(responseContent) == "" && lastStreamError != "" {
 			return "", fmt.Errorf("LM Studio stream error: %s", lastStreamError)
 		}
-		return fullContent, nil
+		return responseContent, nil
 	}
 
 	respBody, err := io.ReadAll(resp.Body)

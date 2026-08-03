@@ -37,7 +37,7 @@ mcpServers 내부에 함께 추가하면 됩니다.
 
 ---
 
-## ⚠️ 참고 사항
+## :material-warning: 참고 사항
 
 - 레이블과 포트 번호를 설정에서 변경시 그에 맞게 수정하세요.
 
@@ -85,6 +85,6 @@ add them inside the `mcpServers` object.
 
 ---
 
-## ⚠️ Notes
+## :material-warning: Notes
 
 - If you change the label or port in settings, make sure to update them accordingly

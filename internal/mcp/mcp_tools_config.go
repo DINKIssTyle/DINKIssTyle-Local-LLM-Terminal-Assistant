@@ -8,7 +8,7 @@ import (
 const toolConfigText = `
 search_web = enable
 read_web_page = enable
-read_buffered_source = disable
+read_buffered_source = enable
 get_current_time = enable
 search_memory = disable
 read_memory = disable
