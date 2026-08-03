@@ -39,20 +39,8 @@ if ! pkg-config --exists webkit2gtk-4.0; then
     fi
 fi
 
-# Ensure frontend is built
-echo "[INFO] Building frontend..."
-cd frontend
-if [ ! -d "node_modules" ]; then
-    echo "[INFO] node_modules not found, running npm install..."
-    npm install --no-audit --no-fund
-else
-    echo "[INFO] node_modules exists, skipping npm install for speed."
-    echo "[TIP] If you have dependency issues, delete frontend/node_modules and run again."
-fi
-npm run build
-cd ..
-
-# Run wails build
+# Wails generates bindings, runs npm ci from wails.json, builds the frontend,
+# and packages the app in one dependency-checked build.
 echo "[INFO] Running wails build..."
 wails build -platform linux/amd64 -o "DKST Terminal AI"
 

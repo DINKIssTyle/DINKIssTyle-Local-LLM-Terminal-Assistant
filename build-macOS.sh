@@ -8,18 +8,6 @@ APP_PATH="build/bin/${APP_NAME}.app"
 
 echo "[INFO] Starting macOS build for DKST Terminal AI..."
 
-# Ensure frontend is built
-echo "[INFO] Building frontend..."
-cd frontend
-if [ ! -d "node_modules" ]; then
-    echo "[INFO] node_modules not found, running npm install..."
-    npm install --no-audit --no-fund
-else
-    echo "[INFO] node_modules exists, skipping npm install."
-fi
-npm run build
-cd ..
-
 # Build the Foundation Models bridge as a universal helper. On SDKs that do
 # not provide FoundationModels, the helper still builds and reports that the
 # capability is unavailable at runtime.
