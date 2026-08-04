@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -74,28 +75,39 @@ func resolveTerminalStartDirectory() (string, error) {
 	return validateTerminalStartDirectory(home)
 }
 
+func resolveTerminalShell() (string, []string, error) {
+	if runtime.GOOS == "windows" {
+		shell, err := exec.LookPath("powershell.exe")
+		if err != nil {
+			return "", nil, fmt.Errorf("resolve PowerShell executable: %w", err)
+		}
+		absoluteShell, err := filepath.Abs(shell)
+		if err != nil {
+			return "", nil, fmt.Errorf("resolve absolute PowerShell path: %w", err)
+		}
+		return absoluteShell, []string{"-NoLogo", "-NoProfile"}, nil
+	}
+
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		if runtime.GOOS == "darwin" {
+			shell = "/bin/zsh"
+		} else {
+			shell = "/bin/sh"
+		}
+	}
+	return shell, []string{"-l"}, nil
+}
+
 func (t *Terminal) Start() error {
 	startDirectory, err := resolveTerminalStartDirectory()
 	if err != nil {
 		return err
 	}
 
-	var shell string
-	var shellArgs []string
-	if runtime.GOOS == "windows" {
-		shell = "powershell.exe"
-		shellArgs = []string{"-NoLogo", "-NoProfile"}
-	} else {
-		shell = os.Getenv("SHELL")
-		if shell == "" {
-			if runtime.GOOS == "darwin" {
-				shell = "/bin/zsh"
-			} else {
-				shell = "/bin/sh"
-			}
-		}
-		// macOS GUI 앱 환경에서는 환경변수(PATH 등)가 제한적이므로 로그인 쉘(-l)로 실행하여 사용자 환경을 모두 로드합니다.
-		shellArgs = []string{"-l"}
+	shell, shellArgs, err := resolveTerminalShell()
+	if err != nil {
+		return err
 	}
 
 	p, err := pty.New()

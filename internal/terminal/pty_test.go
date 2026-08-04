@@ -3,7 +3,10 @@ package terminal
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateTerminalStartDirectoryAcceptsUserDirectory(t *testing.T) {
@@ -35,6 +38,42 @@ func TestValidateTerminalStartDirectoryRejectsFile(t *testing.T) {
 	if _, err := validateTerminalStartDirectory(file.Name()); err == nil {
 		t.Fatal("expected a file path to be rejected")
 	}
+}
+
+func TestWindowsTerminalStartsInUserHome(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows ConPTY regression test")
+	}
+
+	home, err := resolveTerminalStartDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell, _, err := resolveTerminalShell()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(shell) {
+		t.Fatalf("PowerShell path must be absolute when Cmd.Dir is set: %q", shell)
+	}
+
+	terminal := NewTerminal(func(string) {}, func(string) {})
+	if err := terminal.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = terminal.Stop() })
+
+	if err := terminal.Write("(Get-Location).Path\r"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(strings.ToLower(terminal.TailChars(4096)), strings.ToLower(home)) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("PowerShell did not report user home %q; output: %q", home, terminal.TailChars(4096))
 }
 
 func TestProcessTerminalChunkStripsLegacyPowerShellCwdMarker(t *testing.T) {
