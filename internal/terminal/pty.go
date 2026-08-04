@@ -7,6 +7,7 @@ package terminal
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -43,7 +44,42 @@ func NewTerminal(onData func(data string), onCwd func(cwd string)) *Terminal {
 	}
 }
 
+func validateTerminalStartDirectory(directory string) (string, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(directory))
+	if cleaned == "." || cleaned == "" || !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("user home directory is not an absolute path: %q", directory)
+	}
+
+	volume := filepath.VolumeName(cleaned)
+	filesystemRoot := filepath.Clean(volume + string(os.PathSeparator))
+	if cleaned == filesystemRoot {
+		return "", fmt.Errorf("refusing to start terminal in filesystem root: %s", cleaned)
+	}
+
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("user home directory is unavailable: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("user home path is not a directory: %s", cleaned)
+	}
+	return cleaned, nil
+}
+
+func resolveTerminalStartDirectory() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory: %w", err)
+	}
+	return validateTerminalStartDirectory(home)
+}
+
 func (t *Terminal) Start() error {
+	startDirectory, err := resolveTerminalStartDirectory()
+	if err != nil {
+		return err
+	}
+
 	var shell string
 	var shellArgs []string
 	if runtime.GOOS == "windows" {
@@ -68,6 +104,7 @@ func (t *Terminal) Start() error {
 	}
 
 	c := p.Command(shell, shellArgs...)
+	c.Dir = startDirectory
 	c.Env = append(
 		os.Environ(),
 		"TERM=xterm-256color",
@@ -84,6 +121,7 @@ func (t *Terminal) Start() error {
 	t.cmd = c
 	t.shellPath = shell
 	t.shellKind = detectShellKind(shell)
+	t.cwd = startDirectory
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
