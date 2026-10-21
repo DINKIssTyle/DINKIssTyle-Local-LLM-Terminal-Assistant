@@ -1,0 +1,81 @@
+{
+  "harnessSha256": "15fd5bdb91391778384659c479f37d9457ef8390bfe4415cc54a2efa84fcefc5",
+  "note": "Binary planned-task detection only; the app heuristic is a hint, not its full execution behavior.",
+  "cases": 12,
+  "heuristicCorrect": 8,
+  "layaCorrect": 9,
+  "rows": [
+    {
+      "id": "intent-01",
+      "expectedPlanned": false,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-02",
+      "expectedPlanned": false,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-03",
+      "expectedPlanned": false,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-04",
+      "expectedPlanned": false,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-05",
+      "expectedPlanned": false,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-06",
+      "expectedPlanned": false,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-07",
+      "expectedPlanned": false,
+      "heuristicPlanned": false,
+      "layaPlanned": true
+    },
+    {
+      "id": "intent-08",
+      "expectedPlanned": false,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-09",
+      "expectedPlanned": true,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-10",
+      "expectedPlanned": true,
+      "heuristicPlanned": false,
+      "layaPlanned": false
+    },
+    {
+      "id": "intent-11",
+      "expectedPlanned": true,
+      "heuristicPlanned": false,
+      "layaPlanned": true
+    },
+    {
+      "id": "intent-12",
+      "expectedPlanned": true,
+      "heuristicPlanned": false,
+      "layaPlanned": true
+    }
+  ]
+}
